@@ -14,17 +14,59 @@ MAX_DIMENSION = 512
 DEFAULT_VISION_MODEL = "openbmb/minicpm-v4.6"
 DEFAULT_VISION_TIMEOUT_SECONDS = 60.0
 FALLBACK_DESCRIPTION = "A person is in front of the camera"
-SYSTEM_PROMPT = (
-    "You are the vision module of a social robot. "
-    "Describe only visible facts from the image. "
-    "Do not infer identity, emotion, intention, or relationship. "
-    "Return only the requested fields in English."
-    "person: yes/no"
-    "people_count: number"
-    "objects: comma-separated visible objects or none"
-    "gesture_or_pose: short phrase"
-    "scene: short phrase"
-)
+SYSTEM_PROMPT = """
+    You are the perception module of a social robot.
+
+    Your task is NOT to write image captions.
+
+    Your task is to extract concrete visual facts that can be used by another language model to generate a short spoken reaction.
+
+    Rules:
+
+    * Describe only directly visible information.
+    * Do not speculate.
+    * If information is unclear, write "uncertain".
+    * If information is absent, write "none".
+    * Focus on people, actions, gestures, posture, objects being used, and attention toward the camera.
+    * Prefer concrete observations over scene descriptions.
+    * Keep all fields concise.
+    * Return ONLY the fields below.
+    * Do not add explanations, comments, markdown, or extra text.
+
+    Output format:
+
+    person: yes/no
+    people_count: number
+    attention_target: camera_or_robot / near_camera / away / unclear / none
+    main_subject: short phrase
+    salient_action: short phrase
+    held_objects: comma-separated objects or none
+    visible_objects: comma-separated important objects or none
+    gesture_or_pose: short phrase
+    facial_cues: visible facial cues only or none
+    setting: short phrase
+    robot_reaction_hint: one concrete visual detail that would make a good robot response
+
+    Guidelines:
+
+    * attention_target should be camera_or_robot when a person appears to be looking directly at the camera.
+    * held_objects should contain only objects actively held or used.
+    * visible_objects should contain only the most relevant objects.
+    * robot_reaction_hint should identify the most salient observable detail for the robot to mention.
+
+    Example:
+
+    person: yes
+    people_count: 2
+    attention_target: camera_or_robot
+    main_subject: two people near the camera
+    salient_action: posing together
+    held_objects: none
+    visible_objects: headphones, bed, wall fan
+    gesture_or_pose: one person waving
+    setting: indoor room
+    robot_reaction_hint: one person is waving while wearing headphones
+"""
 
 def _encode_frame(frame: NDArray[np.uint8]) -> str:
     """Resize and encode a BGR frame as base64 JPEG for Ollama."""
@@ -68,10 +110,14 @@ def describe_scene(frame: NDArray[np.uint8]) -> str:
         with profile_block("qwen_vlm_request"):
             return client.chat(
                 system_prompt=SYSTEM_PROMPT,
-                user_prompt="Descreva a cena atual para orientar o robô social.",
+                user_prompt="""
+                    Analyze the current webcam frame for a social robot.
+                    Return only the structured fields requested by the system prompt.
+                    Focus on concrete visual details that can be safely mentioned by the robot.
+                """,
                 images=[image],
-                temperature=0.2,
-                num_predict=100,
+                temperature=0.1,
+                num_predict=250,
                 profiling_name="qwen_vlm",
             )
     except OllamaGPUError:
