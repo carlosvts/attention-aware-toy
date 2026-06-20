@@ -14,7 +14,7 @@ from src.attention import (
     AttentionState,
     GazeDurationTracker,
 )
-from src.llm import generate_response, unload_models
+from src.llm import ensure_ollama_ready, generate_response, unload_models
 from src.profiling import profile_block, profile_interaction
 from src.vision import describe_scene
 
@@ -152,6 +152,7 @@ def draw_overlay(
 
 def run() -> None:
     """Run the webcam attention and response loop."""
+    ensure_ollama_ready()
     camera = cv2.VideoCapture(CAMERA_INDEX)
     if not camera.isOpened():
         camera.release()

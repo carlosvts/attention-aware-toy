@@ -46,11 +46,13 @@ quando o índice permanece acima de `0.7` por pelo menos um segundo.
 
 - Python 3.11 ou superior;
 - webcam acessível pelo OpenCV;
-- Ollama, opcional, para descrição visual e geração de resposta;
+- Ollama em execução para descrição visual e geração de resposta;
 - modelos locais `qwen3-vl:2b-instruct` e `qwen2.5:3b`.
 
-Sem Ollama ou sem os modelos, o protótipo continua executando com mensagens de
-fallback, permitindo testar o restante do pipeline.
+Na inicialização, o programa verifica a API do Ollama e os modelos configurados.
+Se o serviço estiver indisponível ou algum modelo obrigatório não estiver
+instalado, a execução termina com uma mensagem explicando como corrigir o
+problema, antes de abrir a webcam ou iniciar uma interação.
 
 ## Instalação
 

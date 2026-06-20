@@ -159,6 +159,48 @@ class OllamaClient:
             raise OllamaError("Ollama retornou uma resposta vazia.")
         return content
 
+    def available_models(self) -> set[str]:
+        """Return the model names exposed by the configured Ollama server."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/api/tags",
+                timeout=(2.0, min(self.timeout_seconds, 10.0)),
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.ConnectionError as error:
+            raise OllamaError(
+                f"Ollama não está disponível em {self.base_url}. "
+                "Instale o Ollama e inicie o serviço com: ollama serve"
+            ) from error
+        except requests.Timeout as error:
+            raise OllamaError(
+                f"Ollama não respondeu em {self.base_url}. "
+                "Verifique se o serviço está em execução."
+            ) from error
+        except requests.RequestException as error:
+            raise OllamaError(
+                f"Não foi possível verificar os modelos em {self.base_url}."
+            ) from error
+        except ValueError as error:
+            raise OllamaError(
+                "Ollama retornou uma lista de modelos inválida."
+            ) from error
+
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            raise OllamaError("Ollama retornou uma lista de modelos inválida.")
+
+        names: set[str] = set()
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            for key in ("name", "model"):
+                value = model.get(key)
+                if isinstance(value, str):
+                    names.add(value)
+        return names
+
     def unload(self) -> None:
         """Ask Ollama to unload this model from memory immediately."""
         try:
