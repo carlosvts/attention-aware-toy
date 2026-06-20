@@ -125,23 +125,36 @@ python -m unittest discover -s tests -v
 ## Profiling e telemetria
 
 O pipeline emite medições de alta precisão com `time.perf_counter()` sem alterar
-suas decisões funcionais. Cada etapa produz uma linha `[PERF]` com latência e
-uma linha `[TELEMETRY]` com tempo de CPU, uso percentual do processo, uso por
-núcleo, RSS, RAM total utilizada e, quando disponível, métricas NVIDIA:
+suas decisões funcionais. Os eventos são salvos em
+`logs/performance-<data>-<pid>.jsonl`, com um objeto JSON independente por linha.
+O formato inclui versão de schema, timestamp UTC, identificador da execução,
+tipo de evento, componente e métricas numéricas, facilitando leitura por scripts,
+LLMs e ferramentas de análise:
 
-```text
-[PERF] attention_detection......... 14.0 ms
-[TELEMETRY] step=attention_detection cpu_process=96.0% cpu_time=13.4 ms cores=[...]
+```json
+{
+  "schema_version": "1.0",
+  "event": "step_metric",
+  "component": "vlm",
+  "step": "qwen_vlm_total",
+  "metrics": {"wall_seconds": 2.7}
+}
 ```
 
-As interações com os modelos também registram tempo até o primeiro fragmento de
-texto e tempo total. Ao final de cada interação multimodal, um relatório agrega
-latência, CPU média, RSS atual e máximo, RAM do sistema, GPU média e VRAM.
+O Qwen visual usa o componente `vlm`; o Qwen textual usa `llm`. Cada um registra
+separadamente tempo até o primeiro fragmento, tempo total, tokens, tempos nativos
+do Ollama e VRAM atribuída ao modelo. Ao final da interação, um evento
+`interaction_report` agrega latência, CPU média, RSS, RAM, GPU e VRAM.
 
 O suporte de CPU/RAM usa `psutil`. A telemetria NVIDIA usa `pynvml`, fornecido
 pelo pacote `nvidia-ml-py`, e depende de driver NVIDIA e NVML acessíveis. Em
 máquinas sem GPU NVIDIA ou sem NVML, o restante do profiling continua ativo e
-os campos de GPU são registrados como `n/a`.
+os campos de GPU são registrados como `null`.
+
+As requisições enviam `num_gpu=-1`, opção do Ollama para offload dinâmico de
+todas as camadas possíveis. Após a inferência, `/api/ps` confirma a VRAM do
+modelo. Se NVML detectar uma GPU NVIDIA local e o Ollama reportar zero VRAM, a
+resposta é rejeitada em vez de continuar silenciosamente em CPU.
 
 Durante cada interação, os recursos são amostrados a cada 200 ms para que esperas
 longas dos modelos não escondam picos de RAM ou atividade de GPU. Métricas NVIDIA
@@ -159,7 +172,7 @@ def executar() -> None:
     ...
 ```
 
-Os logs de captura e detecção são emitidos a cada frame e, portanto, são
+Os logs de captura e detecção são gravados a cada frame e, portanto, são
 intencionalmente verbosos. Isso é adequado para sessões controladas de profiling,
 mas deve ser considerado ao coletar execuções longas.
 
