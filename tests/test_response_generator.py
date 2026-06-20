@@ -8,8 +8,11 @@ from src.llm.response_generator import generate_response
 
 
 class ResponsePromptTests(unittest.TestCase):
+    @patch("src.profiling.record_step")
     @patch("src.llm.response_generator.OllamaClient.from_environment")
-    def test_prompt_contains_attention_duration_and_scene(self, client_factory) -> None:
+    def test_prompt_contains_attention_duration_and_scene(
+        self, client_factory, record_step
+    ) -> None:
         client_factory.return_value.chat.return_value = "Olá!"
 
         result = generate_response(
@@ -20,6 +23,10 @@ class ResponsePromptTests(unittest.TestCase):
 
         self.assertEqual(result, "Olá!")
         system_prompt, user_prompt = client_factory.return_value.chat.call_args.args
+        self.assertEqual(
+            client_factory.return_value.chat.call_args.kwargs["profiling_name"],
+            "qwen_llm",
+        )
         self.assertEqual(system_prompt, "Você é um robô social assistivo.")
         self.assertIn("Estado de atenção do usuário: ATTENDING", user_prompt)
         self.assertIn("Duração do olhar: 1.2s", user_prompt)
