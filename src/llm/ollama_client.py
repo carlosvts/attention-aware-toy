@@ -15,7 +15,7 @@ from src.profiling import (
 )
 
 DEFAULT_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "qwen2.5:3b"
+DEFAULT_MODEL = "qwen2.5:1.5b"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
