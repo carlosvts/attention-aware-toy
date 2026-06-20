@@ -11,6 +11,8 @@ import mediapipe as mp
 import numpy as np
 from numpy.typing import NDArray
 
+from src.profiling import profile_block, profile_step
+
 
 @dataclass(frozen=True)
 class AttentionComponents:
@@ -260,13 +262,20 @@ class AttentionDetector:
         )
         self._last_timestamp_ms = -1
 
+    @profile_step("attention_pipeline")
     def process(self, frame: NDArray[np.uint8]) -> AttentionResult:
         """Return a weighted gaze/pose score and the largest detected face box."""
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        media_pipe_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        with profile_block("image_preprocess"):
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            media_pipe_image = mp.Image(
+                image_format=mp.ImageFormat.SRGB, data=rgb_frame
+            )
         timestamp_ms = max(self._last_timestamp_ms + 1, time.monotonic_ns() // 1_000_000)
         self._last_timestamp_ms = timestamp_ms
-        result = self._face_landmarker.detect_for_video(media_pipe_image, timestamp_ms)
+        with profile_block("attention_detection"):
+            result = self._face_landmarker.detect_for_video(
+                media_pipe_image, timestamp_ms
+            )
         if not result.face_landmarks:
             return AttentionResult(score=0.0, face_box=None)
 

@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from src.llm.ollama_client import OllamaClient, OllamaError
+from src.profiling import profile_block, profile_step
 
 DEFAULT_VISION_MODEL = "qwen3-vl:2b-instruct"
 DEFAULT_VISION_TIMEOUT_SECONDS = 60.0
@@ -20,26 +21,30 @@ Não faça suposições sobre identidade, intenção, emoção ou direção do o
 
 def _encode_frame(frame: NDArray[np.uint8]) -> str:
     """Resize and encode a BGR frame as base64 JPEG for Ollama."""
-    height, width = frame.shape[:2]
-    largest_dimension = max(height, width)
-    if largest_dimension > 1024:
-        scale = 1024 / largest_dimension
-        frame = cv2.resize(
-            frame,
-            (int(width * scale), int(height * scale)),
-            interpolation=cv2.INTER_AREA,
-        )
+    with profile_block("vl_image_preprocess"):
+        height, width = frame.shape[:2]
+        largest_dimension = max(height, width)
+        if largest_dimension > 1024:
+            scale = 1024 / largest_dimension
+            frame = cv2.resize(
+                frame,
+                (int(width * scale), int(height * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
 
-    encoded, jpeg = cv2.imencode(
-        ".jpg",
-        frame,
-        [cv2.IMWRITE_JPEG_QUALITY, 85],
-    )
+    with profile_block("image_encode"):
+        encoded, jpeg = cv2.imencode(
+            ".jpg",
+            frame,
+            [cv2.IMWRITE_JPEG_QUALITY, 85],
+        )
     if not encoded:
         raise ValueError("Não foi possível codificar o frame da webcam.")
-    return base64.b64encode(jpeg.tobytes()).decode("ascii")
+    with profile_block("image_base64"):
+        return base64.b64encode(jpeg.tobytes()).decode("ascii")
 
 
+@profile_step("qwen_vl")
 def describe_scene(frame: NDArray[np.uint8]) -> str:
     """Describe a captured BGR frame using Qwen VLM with a safe fallback."""
     if frame.size == 0:
@@ -53,13 +58,15 @@ def describe_scene(frame: NDArray[np.uint8]) -> str:
             timeout_variable="OLLAMA_VISION_TIMEOUT_SECONDS",
             default_timeout=DEFAULT_VISION_TIMEOUT_SECONDS,
         )
-        return client.chat(
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt="Descreva a cena atual para orientar o robô social.",
-            images=[image],
-            temperature=0.2,
-            num_predict=100,
-        )
+        with profile_block("qwen3_vl_request"):
+            return client.chat(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt="Descreva a cena atual para orientar o robô social.",
+                images=[image],
+                temperature=0.2,
+                num_predict=100,
+                profiling_name="qwen3_vl",
+            )
     except (OllamaError, ValueError) as error:
         print(
             f"Aviso: falha ao descrever a cena: {error} Usando fallback.",

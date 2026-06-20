@@ -15,6 +15,7 @@ from src.attention import (
     GazeDurationTracker,
 )
 from src.llm import generate_response, unload_models
+from src.profiling import profile_block, profile_interaction
 from src.vision import describe_scene
 
 CAMERA_INDEX = 0
@@ -94,9 +95,12 @@ def generate_interaction(
     gaze_duration: float,
 ) -> tuple[str, str]:
     """Describe a frame and generate the robot's textual response."""
-    scene_description = describe_scene(frame)
-    response = generate_response(scene_description, attention_state, gaze_duration)
-    return scene_description, response
+    with profile_interaction():
+        scene_description = describe_scene(frame)
+        response = generate_response(
+            scene_description, attention_state, gaze_duration
+        )
+        return scene_description, response
 
 
 def draw_overlay(
@@ -167,7 +171,8 @@ def run() -> None:
     try:
         with AttentionDetector() as detector:
             while True:
-                ok, frame = camera.read()
+                with profile_block("frame_capture"):
+                    ok, frame = camera.read()
                 if not ok:
                     print("Não foi possível capturar um frame da webcam.")
                     break

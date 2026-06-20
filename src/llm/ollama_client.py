@@ -1,10 +1,14 @@
 """Small HTTP client for a local Ollama server."""
 
 from dataclasses import dataclass
+import json
 import os
+import time
 from typing import Any
 
 import requests
+
+from src.profiling import record_elapsed
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:3b"
@@ -60,8 +64,9 @@ class OllamaClient:
         images: list[str] | None = None,
         temperature: float = 0.6,
         num_predict: int = 80,
+        profiling_name: str | None = None,
     ) -> str:
-        """Send a non-streaming chat request and return its text content."""
+        """Stream a chat request to measure first-token and total latency."""
         user_message: dict[str, Any] = {
             "role": "user",
             "content": user_prompt,
@@ -71,7 +76,7 @@ class OllamaClient:
 
         payload: dict[str, Any] = {
             "model": self.model,
-            "stream": False,
+            "stream": True,
             "think": False,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -83,13 +88,40 @@ class OllamaClient:
             },
         }
 
+        started_at = time.perf_counter()
+        cpu_started_at = time.process_time()
+        response: requests.Response | None = None
+        content_parts: list[str] = []
+        first_token_recorded = False
         try:
             response = requests.post(
                 f"{self.base_url}/api/chat",
                 json=payload,
+                stream=True,
                 timeout=(2.0, self.timeout_seconds),
             )
             response.raise_for_status()
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    content = data.get("message", {}).get("content", "")
+                except (AttributeError, TypeError, ValueError) as error:
+                    raise OllamaError(
+                        "Ollama retornou uma resposta inválida."
+                    ) from error
+                if not isinstance(content, str):
+                    raise OllamaError("Ollama retornou uma resposta inválida.")
+                if content:
+                    if profiling_name and not first_token_recorded:
+                        record_elapsed(
+                            f"{profiling_name}_first_token",
+                            started_at,
+                            cpu_started_at,
+                        )
+                        first_token_recorded = True
+                    content_parts.append(content)
         except requests.Timeout as error:
             raise OllamaError(
                 f"Ollama excedeu o timeout de {self.timeout_seconds:g}s."
@@ -114,16 +146,18 @@ class OllamaClient:
             raise OllamaError(message) from error
         except requests.RequestException as error:
             raise OllamaError(f"Falha ao consultar o Ollama: {error}") from error
+        finally:
+            if response is not None:
+                response.close()
+            if profiling_name:
+                record_elapsed(
+                    f"{profiling_name}_total", started_at, cpu_started_at
+                )
 
-        try:
-            data = response.json()
-            content = data["message"]["content"]
-        except (KeyError, TypeError, ValueError) as error:
-            raise OllamaError("Ollama retornou uma resposta inválida.") from error
-
-        if not isinstance(content, str) or not content.strip():
+        content = "".join(content_parts).strip()
+        if not content:
             raise OllamaError("Ollama retornou uma resposta vazia.")
-        return content.strip()
+        return content
 
     def unload(self) -> None:
         """Ask Ollama to unload this model from memory immediately."""
