@@ -5,7 +5,7 @@ import sys
 from src.attention import AttentionState
 from src.profiling import profile_block, profile_step
 
-from .ollama_client import OllamaClient, OllamaError
+from .ollama_client import OllamaClient, OllamaError, OllamaGPUError
 
 FALLBACK_RESPONSE = (
     "[FAALBACK] Oi, percebi que você está olhando para mim. Posso ajudar em algo?"
@@ -13,7 +13,7 @@ FALLBACK_RESPONSE = (
 SYSTEM_PROMPT = "Você é um robô social assistivo."
 
 
-@profile_step("qwen_text")
+@profile_step("qwen_llm_pipeline")
 def generate_response(
     scene_description: str,
     attention_state: AttentionState = AttentionState.ATTENDING,
@@ -30,12 +30,14 @@ Cena observada: {scene_description.strip()}
 Responda de forma curta, amigável e contextual.
 Não mencione detalhes incertos da imagem."""
     try:
-        with profile_block("qwen2.5_request"):
+        with profile_block("qwen_llm_request"):
             return OllamaClient.from_environment().chat(
                 SYSTEM_PROMPT,
                 user_prompt,
-                profiling_name="qwen2.5",
+                profiling_name="qwen_llm",
             )
+    except OllamaGPUError:
+        raise
     except OllamaError as error:
         print(f"Aviso: {error} Usando resposta de fallback.", file=sys.stderr)
         return FALLBACK_RESPONSE

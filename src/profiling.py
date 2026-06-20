@@ -6,11 +6,15 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from functools import wraps
+import json
 import os
+from pathlib import Path
 import threading
 import time
 from typing import Any, ParamSpec, TypeVar
+from uuid import uuid4
 
 try:
     import psutil
@@ -85,6 +89,10 @@ class _NvidiaMonitor:
     def availability_error(self) -> str | None:
         return self._error
 
+    @property
+    def available(self) -> bool:
+        return bool(self._handles)
+
     def snapshot(self) -> dict[str, float | int | None] | None:
         if not self._handles or pynvml is None:
             return None
@@ -129,23 +137,70 @@ class _NvidiaMonitor:
         }
 
 
-_print_lock = threading.Lock()
+_log_lock = threading.Lock()
 _current_interaction: ContextVar[InteractionMetrics | None] = ContextVar(
     "current_interaction", default=None
 )
 _process = psutil.Process(os.getpid()) if psutil is not None else None
 _nvidia = _NvidiaMonitor()
 _availability_reported = False
+_run_id = str(uuid4())
+_project_root = Path(__file__).resolve().parents[1]
+_log_directory = Path(os.getenv("ATTENTION_LOG_DIR", _project_root / "logs"))
+_log_started_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+_log_path = _log_directory / f"performance-{_log_started_at}-{os.getpid()}.jsonl"
 
 
-def _megabytes(value: int) -> float:
-    return value / (1024 * 1024)
+def get_performance_log_path() -> Path:
+    """Return the JSONL file used by this process."""
+    return _log_path
 
 
-def _format_duration(seconds: float) -> str:
-    if seconds >= 1.0:
-        return f"{seconds:.3f} s"
-    return f"{seconds * 1000:.1f} ms"
+def nvidia_gpu_available() -> bool:
+    """Return whether NVML can see at least one local NVIDIA GPU."""
+    return _nvidia.available
+
+
+def _component_for_step(name: str) -> str:
+    if name.startswith("qwen_vlm"):
+        return "vlm"
+    if name.startswith("qwen_llm"):
+        return "llm"
+    return "pipeline"
+
+
+def _write_event(
+    event: str,
+    component: str,
+    data: dict[str, Any],
+) -> None:
+    """Append one self-contained, machine-readable JSON object to the run log."""
+    payload = {
+        "schema_version": "1.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "run_id": _run_id,
+        "event": event,
+        "component": component,
+        **data,
+    }
+    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    with _log_lock:
+        _log_directory.mkdir(parents=True, exist_ok=True)
+        with _log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"{line}\n")
+
+
+def record_model_metrics(
+    component: str,
+    model: str,
+    metrics: dict[str, Any],
+) -> None:
+    """Record Ollama-native metrics separately for the VLM or LLM."""
+    _write_event(
+        "model_metrics",
+        component,
+        {"model": model, "metrics": metrics},
+    )
 
 
 def _resource_snapshot(process_cpu_percent: float) -> ResourceSnapshot:
@@ -195,8 +250,11 @@ def _emit_availability_once() -> None:
     if _nvidia.availability_error:
         messages.append(f"GPU NVIDIA indisponível: {_nvidia.availability_error}")
     if messages:
-        with _print_lock:
-            print(f"[TELEMETRY] {'; '.join(messages)}")
+        _write_event(
+            "telemetry_availability",
+            "system",
+            {"available": False, "messages": messages},
+        )
 
 
 def record_step(name: str, wall_seconds: float, cpu_seconds: float = 0.0) -> None:
@@ -209,36 +267,27 @@ def record_step(name: str, wall_seconds: float, cpu_seconds: float = 0.0) -> Non
     if interaction is not None:
         interaction.add_snapshot(snapshot)
 
-    cores = ",".join(f"{value:.0f}" for value in snapshot.per_core_cpu_percent)
-    gpu_fields = "gpu=n/a"
-    if snapshot.gpu_util_percent is not None:
-        power = (
-            f"{snapshot.gpu_power_watts:.1f}W"
-            if snapshot.gpu_power_watts is not None
-            else "n/a"
-        )
-        temperature = (
-            f"{snapshot.gpu_temperature_c:.0f}C"
-            if snapshot.gpu_temperature_c is not None
-            else "n/a"
-        )
-        gpu_fields = (
-            f"gpu={snapshot.gpu_util_percent:.1f}% "
-            f"vram_used={_megabytes(snapshot.vram_used_bytes or 0):.1f}MB "
-            f"vram_free={_megabytes(snapshot.vram_free_bytes or 0):.1f}MB "
-            f"power={power} temp={temperature}"
-        )
-
-    with _print_lock:
-        print(f"[PERF] {name:.<28} {_format_duration(wall_seconds)}")
-        print(
-            f"[TELEMETRY] step={name} cpu_process={process_cpu:.1f}% "
-            f"cpu_time={_format_duration(cpu_seconds)} cores=[{cores}] "
-            f"rss={_megabytes(snapshot.rss_bytes):.1f}MB "
-            f"ram_used={_megabytes(snapshot.system_memory_used_bytes):.1f}/"
-            f"{_megabytes(snapshot.system_memory_total_bytes):.1f}MB "
-            f"{gpu_fields}"
-        )
+    _write_event(
+        "step_metric",
+        _component_for_step(name),
+        {
+            "step": name,
+            "metrics": {
+                "wall_seconds": wall_seconds,
+                "cpu_seconds": cpu_seconds,
+                "process_cpu_percent": process_cpu,
+                "per_core_cpu_percent": snapshot.per_core_cpu_percent,
+                "rss_bytes": snapshot.rss_bytes,
+                "system_memory_used_bytes": snapshot.system_memory_used_bytes,
+                "system_memory_total_bytes": snapshot.system_memory_total_bytes,
+                "gpu_util_percent": snapshot.gpu_util_percent,
+                "vram_used_bytes": snapshot.vram_used_bytes,
+                "vram_free_bytes": snapshot.vram_free_bytes,
+                "gpu_power_watts": snapshot.gpu_power_watts,
+                "gpu_temperature_c": snapshot.gpu_temperature_c,
+            },
+        },
+    )
     _emit_availability_once()
 
 
@@ -287,7 +336,7 @@ def _average(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
-def _print_interaction_report(metrics: InteractionMetrics) -> None:
+def _record_interaction_report(metrics: InteractionMetrics) -> None:
     latency = time.perf_counter() - metrics.started_at
     cpu_seconds = time.process_time() - metrics.cpu_started_at
     cpu_average = cpu_seconds / latency * 100.0 if latency > 0 else 0.0
@@ -301,29 +350,23 @@ def _print_interaction_report(metrics: InteractionMetrics) -> None:
             if snapshot.gpu_util_percent is not None
         ]
     )
-    vram_used = final.vram_used_bytes
-
-    with _print_lock:
-        print("===== INTERACTION REPORT =====")
-        print(f"Total latency: {latency:.2f} s")
-        print(f"CPU avg: {cpu_average:.1f}%")
-        print(f"RAM: {_megabytes(final.rss_bytes):.1f} MB RSS")
-        print(f"RAM peak: {_megabytes(peak_rss):.1f} MB RSS")
-        print(
-            f"System RAM used: {_megabytes(final.system_memory_used_bytes):.1f} / "
-            f"{_megabytes(final.system_memory_total_bytes):.1f} MB"
-        )
-        print(
-            f"GPU util avg: {gpu_average:.1f}%"
-            if gpu_average is not None
-            else "GPU util avg: n/a"
-        )
-        print(
-            f"VRAM used: {_megabytes(vram_used):.1f} MB"
-            if vram_used is not None
-            else "VRAM used: n/a"
-        )
-        print("==============================")
+    _write_event(
+        "interaction_report",
+        "interaction",
+        {
+            "metrics": {
+                "total_latency_seconds": latency,
+                "cpu_average_percent": cpu_average,
+                "rss_bytes": final.rss_bytes,
+                "peak_rss_bytes": peak_rss,
+                "system_memory_used_bytes": final.system_memory_used_bytes,
+                "system_memory_total_bytes": final.system_memory_total_bytes,
+                "gpu_util_average_percent": gpu_average,
+                "vram_used_bytes": final.vram_used_bytes,
+                "sample_count": len(snapshots),
+            }
+        },
+    )
 
 
 @contextmanager
@@ -345,7 +388,7 @@ def profile_interaction() -> Generator[None, None, None]:
         stop_sampling.set()
         sampler.join()
         record_elapsed("interaction_total", metrics.started_at, metrics.cpu_started_at)
-        _print_interaction_report(metrics)
+        _record_interaction_report(metrics)
         _current_interaction.reset(token)
 
 

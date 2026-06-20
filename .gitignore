@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Runtime profiling output
+logs/*.jsonl
+!logs/.gitkeep

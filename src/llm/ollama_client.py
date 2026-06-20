@@ -8,7 +8,11 @@ from typing import Any
 
 import requests
 
-from src.profiling import record_elapsed
+from src.profiling import (
+    nvidia_gpu_available,
+    record_elapsed,
+    record_model_metrics,
+)
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:3b"
@@ -17,6 +21,10 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 
 class OllamaError(RuntimeError):
     """Raised when Ollama cannot produce a valid response."""
+
+
+class OllamaGPUError(OllamaError):
+    """Raised when a visible NVIDIA GPU was not used by Ollama."""
 
 
 @dataclass(frozen=True)
@@ -85,6 +93,8 @@ class OllamaClient:
             "options": {
                 "temperature": temperature,
                 "num_predict": num_predict,
+                # Ollama defines -1 as dynamic offload of every possible layer.
+                "num_gpu": -1,
             },
         }
 
@@ -93,6 +103,7 @@ class OllamaClient:
         response: requests.Response | None = None
         content_parts: list[str] = []
         first_token_recorded = False
+        final_data: dict[str, Any] = {}
         try:
             response = requests.post(
                 f"{self.base_url}/api/chat",
@@ -113,6 +124,8 @@ class OllamaClient:
                     ) from error
                 if not isinstance(content, str):
                     raise OllamaError("Ollama retornou uma resposta inválida.")
+                if data.get("done") is True:
+                    final_data = data
                 if content:
                     if profiling_name and not first_token_recorded:
                         record_elapsed(
@@ -157,7 +170,61 @@ class OllamaClient:
         content = "".join(content_parts).strip()
         if not content:
             raise OllamaError("Ollama retornou uma resposta vazia.")
+        model_vram_bytes = self.running_model_vram()
+        gpu_is_available = nvidia_gpu_available()
+        if profiling_name:
+            component = "vlm" if profiling_name == "qwen_vlm" else "llm"
+            record_model_metrics(
+                component,
+                self.model,
+                {
+                    "ollama_total_duration_ns": final_data.get("total_duration"),
+                    "ollama_load_duration_ns": final_data.get("load_duration"),
+                    "prompt_eval_count": final_data.get("prompt_eval_count"),
+                    "prompt_eval_duration_ns": final_data.get(
+                        "prompt_eval_duration"
+                    ),
+                    "eval_count": final_data.get("eval_count"),
+                    "eval_duration_ns": final_data.get("eval_duration"),
+                    "gpu_requested": True,
+                    "gpu_available": gpu_is_available,
+                    "gpu_verified": bool(model_vram_bytes),
+                    "model_vram_bytes": model_vram_bytes,
+                },
+            )
+        if gpu_is_available and not model_vram_bytes:
+            raise OllamaGPUError(
+                f"Uma GPU NVIDIA está disponível, mas o modelo '{self.model}' "
+                "foi carregado sem VRAM. A execução em CPU foi interrompida."
+            )
         return content
+
+    def running_model_vram(self) -> int | None:
+        """Return VRAM assigned to this loaded model according to Ollama."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/api/ps",
+                timeout=(2.0, min(self.timeout_seconds, 10.0)),
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as error:
+            if nvidia_gpu_available():
+                raise OllamaGPUError(
+                    "Não foi possível confirmar o uso de GPU pela API do Ollama."
+                ) from error
+            return None
+
+        models = data.get("models", []) if isinstance(data, dict) else []
+        for model in models if isinstance(models, list) else []:
+            if not isinstance(model, dict):
+                continue
+            name = model.get("name") or model.get("model")
+            accepted_names = {self.model, f"{self.model}:latest"}
+            if name in accepted_names:
+                size_vram = model.get("size_vram")
+                return int(size_vram) if isinstance(size_vram, int) else None
+        return None
 
     def available_models(self) -> set[str]:
         """Return the model names exposed by the configured Ollama server."""

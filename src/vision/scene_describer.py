@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from src.llm.ollama_client import OllamaClient, OllamaError
+from src.llm.ollama_client import OllamaClient, OllamaError, OllamaGPUError
 from src.profiling import profile_block, profile_step
 
 DEFAULT_VISION_MODEL = "qwen3-vl:2b-instruct"
@@ -44,7 +44,7 @@ def _encode_frame(frame: NDArray[np.uint8]) -> str:
         return base64.b64encode(jpeg.tobytes()).decode("ascii")
 
 
-@profile_step("qwen_vl")
+@profile_step("qwen_vlm_pipeline")
 def describe_scene(frame: NDArray[np.uint8]) -> str:
     """Describe a captured BGR frame using Qwen VLM with a safe fallback."""
     if frame.size == 0:
@@ -58,15 +58,17 @@ def describe_scene(frame: NDArray[np.uint8]) -> str:
             timeout_variable="OLLAMA_VISION_TIMEOUT_SECONDS",
             default_timeout=DEFAULT_VISION_TIMEOUT_SECONDS,
         )
-        with profile_block("qwen3_vl_request"):
+        with profile_block("qwen_vlm_request"):
             return client.chat(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt="Descreva a cena atual para orientar o robô social.",
                 images=[image],
                 temperature=0.2,
                 num_predict=100,
-                profiling_name="qwen3_vl",
+                profiling_name="qwen_vlm",
             )
+    except OllamaGPUError:
+        raise
     except (OllamaError, ValueError) as error:
         print(
             f"Aviso: falha ao descrever a cena: {error} Usando fallback.",
