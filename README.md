@@ -120,6 +120,47 @@ Com o ambiente virtual ativo:
 python -m unittest discover -s tests -v
 ```
 
+## Profiling e telemetria
+
+O pipeline emite medições de alta precisão com `time.perf_counter()` sem alterar
+suas decisões funcionais. Cada etapa produz uma linha `[PERF]` com latência e
+uma linha `[TELEMETRY]` com tempo de CPU, uso percentual do processo, uso por
+núcleo, RSS, RAM total utilizada e, quando disponível, métricas NVIDIA:
+
+```text
+[PERF] attention_detection......... 14.0 ms
+[TELEMETRY] step=attention_detection cpu_process=96.0% cpu_time=13.4 ms cores=[...]
+```
+
+As interações com os modelos também registram tempo até o primeiro fragmento de
+texto e tempo total. Ao final de cada interação multimodal, um relatório agrega
+latência, CPU média, RSS atual e máximo, RAM do sistema, GPU média e VRAM.
+
+O suporte de CPU/RAM usa `psutil`. A telemetria NVIDIA usa `pynvml`, fornecido
+pelo pacote `nvidia-ml-py`, e depende de driver NVIDIA e NVML acessíveis. Em
+máquinas sem GPU NVIDIA ou sem NVML, o restante do profiling continua ativo e
+os campos de GPU são registrados como `n/a`.
+
+Durante cada interação, os recursos são amostrados a cada 200 ms para que esperas
+longas dos modelos não escondam picos de RAM ou atividade de GPU. Métricas NVIDIA
+são agregadas entre todas as GPUs visíveis; uso por núcleo representa a carga do
+sistema observada em cada núcleo, enquanto `cpu_process` mede somente o processo
+Python e pode ultrapassar 100% quando utiliza múltiplos núcleos.
+
+Novas funções síncronas podem ser instrumentadas sem alterar sua implementação:
+
+```python
+from src.profiling import profile_step
+
+@profile_step("minha_etapa")
+def executar() -> None:
+    ...
+```
+
+Os logs de captura e detecção são emitidos a cada frame e, portanto, são
+intencionalmente verbosos. Isso é adequado para sessões controladas de profiling,
+mas deve ser considerado ao coletar execuções longas.
+
 ## Limitações e uso responsável
 
 - O índice de atenção é uma heurística, não uma medida objetiva de atenção.
