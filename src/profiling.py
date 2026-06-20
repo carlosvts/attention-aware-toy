@@ -203,6 +203,26 @@ def record_model_metrics(
     )
 
 
+def record_ollama_lifecycle(
+    message: str,
+    component: str,
+    model: str,
+    resident_models: list[dict[str, Any]] | None,
+    **details: Any,
+) -> None:
+    """Record explicit Ollama load, reuse, and unload lifecycle evidence."""
+    _write_event(
+        "ollama_lifecycle",
+        component,
+        {
+            "message": message,
+            "model": model,
+            "resident_models": resident_models,
+            "details": details,
+        },
+    )
+
+
 def _resource_snapshot(process_cpu_percent: float) -> ResourceSnapshot:
     if psutil is not None and _process is not None:
         per_core = tuple(float(value) for value in psutil.cpu_percent(percpu=True))

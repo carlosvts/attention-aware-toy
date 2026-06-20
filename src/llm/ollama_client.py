@@ -12,6 +12,7 @@ from src.profiling import (
     nvidia_gpu_available,
     record_elapsed,
     record_model_metrics,
+    record_ollama_lifecycle,
 )
 
 DEFAULT_BASE_URL = "http://localhost:11434"
@@ -75,6 +76,20 @@ class OllamaClient:
         profiling_name: str | None = None,
     ) -> str:
         """Stream a chat request to measure first-token and total latency."""
+        component = "vlm" if profiling_name == "qwen_vlm" else "llm"
+        resident_before = self.running_models()
+        was_loaded = self._find_running_model(resident_before) is not None
+        record_ollama_lifecycle(
+            (
+                "[OLLAMA] Reusing loaded model"
+                if was_loaded
+                else "[OLLAMA] Loading model..."
+            ),
+            component,
+            self.model,
+            resident_before,
+            keep_alive="ollama_default",
+        )
         user_message: dict[str, Any] = {
             "role": "user",
             "content": user_prompt,
@@ -170,22 +185,45 @@ class OllamaClient:
         content = "".join(content_parts).strip()
         if not content:
             raise OllamaError("Ollama retornou uma resposta vazia.")
-        model_vram_bytes = self.running_model_vram()
+        resident_after = self.running_models()
+        running_model = self._find_running_model(resident_after)
+        model_vram_bytes = (
+            running_model.get("size_vram") if running_model is not None else None
+        )
+        if not was_loaded:
+            record_ollama_lifecycle(
+                "[OLLAMA] Model loaded",
+                component,
+                self.model,
+                resident_after,
+                load_duration_ns=final_data.get("load_duration"),
+            )
         gpu_is_available = nvidia_gpu_available()
         if profiling_name:
-            component = "vlm" if profiling_name == "qwen_vlm" else "llm"
             record_model_metrics(
                 component,
                 self.model,
                 {
                     "ollama_total_duration_ns": final_data.get("total_duration"),
+                    "ollama_total_duration_seconds": _nanoseconds_to_seconds(
+                        final_data.get("total_duration")
+                    ),
                     "ollama_load_duration_ns": final_data.get("load_duration"),
+                    "ollama_load_duration_seconds": _nanoseconds_to_seconds(
+                        final_data.get("load_duration")
+                    ),
                     "prompt_eval_count": final_data.get("prompt_eval_count"),
                     "prompt_eval_duration_ns": final_data.get(
                         "prompt_eval_duration"
                     ),
+                    "prompt_eval_duration_seconds": _nanoseconds_to_seconds(
+                        final_data.get("prompt_eval_duration")
+                    ),
                     "eval_count": final_data.get("eval_count"),
                     "eval_duration_ns": final_data.get("eval_duration"),
+                    "eval_duration_seconds": _nanoseconds_to_seconds(
+                        final_data.get("eval_duration")
+                    ),
                     "gpu_requested": True,
                     "gpu_available": gpu_is_available,
                     "gpu_verified": bool(model_vram_bytes),
@@ -199,8 +237,8 @@ class OllamaClient:
             )
         return content
 
-    def running_model_vram(self) -> int | None:
-        """Return VRAM assigned to this loaded model according to Ollama."""
+    def running_models(self) -> list[dict[str, Any]] | None:
+        """Return Ollama's current residency snapshot without changing it."""
         try:
             response = requests.get(
                 f"{self.base_url}/api/ps",
@@ -216,14 +254,20 @@ class OllamaClient:
             return None
 
         models = data.get("models", []) if isinstance(data, dict) else []
-        for model in models if isinstance(models, list) else []:
-            if not isinstance(model, dict):
-                continue
+        if not isinstance(models, list):
+            return None
+        return [model for model in models if isinstance(model, dict)]
+
+    def _find_running_model(
+        self, models: list[dict[str, Any]] | None
+    ) -> dict[str, Any] | None:
+        accepted_names = {self.model}
+        if ":" not in self.model:
+            accepted_names.add(f"{self.model}:latest")
+        for model in models or []:
             name = model.get("name") or model.get("model")
-            accepted_names = {self.model, f"{self.model}:latest"}
             if name in accepted_names:
-                size_vram = model.get("size_vram")
-                return int(size_vram) if isinstance(size_vram, int) else None
+                return model
         return None
 
     def available_models(self) -> set[str]:
@@ -270,6 +314,13 @@ class OllamaClient:
 
     def unload(self) -> None:
         """Ask Ollama to unload this model from memory immediately."""
+        record_ollama_lifecycle(
+            "[OLLAMA] Unloading model",
+            "ollama",
+            self.model,
+            self.running_models(),
+            keep_alive=0,
+        )
         try:
             response = requests.post(
                 f"{self.base_url}/api/generate",
@@ -281,3 +332,7 @@ class OllamaClient:
             raise OllamaError(
                 f"Não foi possível descarregar o modelo '{self.model}' do Ollama."
             ) from error
+
+
+def _nanoseconds_to_seconds(value: Any) -> float | None:
+    return value / 1_000_000_000 if isinstance(value, int) else None
