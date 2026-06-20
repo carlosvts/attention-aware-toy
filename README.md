@@ -1,195 +1,102 @@
 # Attention-Aware Toy
 
-Protótipo experimental de percepção de atenção para futuras aplicações de
-interação humano-robô (Human-Robot Interaction, HRI). O projeto combina visão
-computacional e modelos multimodais locais para explorar como um robô social
-poderia perceber sinais visuais de engajamento e decidir quando iniciar uma
-interação.
+An experimental attention-perception prototype for Human-Robot Interaction (HRI). It combines computer vision with locally-run multimodal models to explore how a social robot could perceive visual engagement and decide when to start an interaction.
 
-Este repositório é um *toy project*: ele serve como ambiente de experimentação,
-aprendizado e validação de ideias. Não é um sistema de produção, não realiza
-reconhecimento de identidade e não deve ser usado para inferir intenção, emoção
-ou estados mentais.
+This is a *toy project* for experimentation and learning — not a production system. It performs no identity recognition and should not be used to infer intent, emotion, or mental state.
 
-## Objetivo
+## Overview
 
-O fluxo atual usa a webcam para detectar um rosto, estimar pose da cabeça e
-direção aproximada das íris, compor um índice de atenção e acompanhar por quanto
-tempo a pessoa permanece voltada para a câmera. Quando a atenção se sustenta, o
-sistema:
+A webcam feed runs through a face-landmark pipeline that scores attention every frame, classifies it into a discrete state, and tracks how long that state holds. When attention is sustained, the system asynchronously: captures the frame, describes the scene with a local vision-language model, and generates a short reply conditioned on both the scene and the current attention state — while the live overlay keeps rendering uninterrupted.
 
-1. captura o quadro atual;
-2. descreve a cena com um modelo visual local;
-3. gera uma resposta textual curta e contextual;
-4. exibe no vídeo os sinais utilizados na estimativa.
+## How it works
 
-A intenção de longo prazo é usar esses experimentos como base para algum projeto
-futuro envolvendo HRI, computer vision e comportamentos de robôs sensíveis ao
-contexto social.
+**Face and landmark detection** — MediaPipe FaceLandmarker tracks up to 4 faces per frame; the largest is used as the active subject.
 
-## Arquitetura experimental
+**Attention scoring** — a weighted score combines head pose (40%), iris direction (30%), nose position (15%), eye symmetry (10%), and face position (5%), derived from landmarks and the 3D facial transformation matrix.
 
-- **Detecção facial e landmarks:** MediaPipe e OpenCV.
-- **Estimativa de atenção:** pose da cabeça, direção das íris, posição do nariz,
-  abertura dos olhos e posição do rosto no quadro.
-- **Descrição visual:** Qwen3-VL executado localmente pelo Ollama.
-- **Resposta contextual:** Qwen2.5 executado localmente pelo Ollama.
-- **Controle temporal:** duração do olhar, sessões de atenção e cooldown entre
-  interações.
+**Attention state machine** — the score is classified each frame into `NO_FACE`, `FACE_DETECTED` (≤0.30), `LOOKING_BRIEFLY` (≤0.50), `DISTRACTED` (≤0.70), or `ATTENDING` (>0.70).
 
-O maior rosto detectado é usado como referência. O `attention_score` pondera pose
-da cabeça (40%), direção das íris (30%), posição do nariz (15%), simetria e
-abertura dos olhos (10%) e posição do rosto (5%). Atenção sustentada é confirmada
-quando o índice permanece acima de `0.7` por pelo menos um segundo.
+**Session gating** — sustained attention triggers one interaction per "session"; a new one is only allowed after attention drops below threshold and stays there for a release window, preventing repeated firing during a single gaze.
 
-## Requisitos
+**Asynchronous pipeline** — perception and generation run on a background thread, so the webcam loop and overlay never block while a response is pending.
 
-- Python 3.11 ou superior;
-- webcam acessível pelo OpenCV;
-- Ollama em execução para descrição visual e geração de resposta;
-- modelos locais `qwen3-vl:2b-instruct` e `qwen2.5:3b`.
+**Scene description** — a local vision-language model (MiniCPM-V, via Ollama) returns a constrained, structured description (person present, count, objects, gesture, scene) from a downscaled frame, explicitly barred from inferring identity, emotion, or intention.
 
-Na inicialização, o programa verifica a API do Ollama e os modelos configurados.
-Se o serviço estiver indisponível ou algum modelo obrigatório não estiver
-instalado, a execução termina com uma mensagem explicando como corrigir o
-problema, antes de abrir a webcam ou iniciar uma interação.
+**Contextual response generation** — a local language model (Qwen2.5, via Ollama) turns that description into a short reply, conditioned on the current attention state and gaze duration.
 
-## Instalação
+**Modular VLM/LLM boundary** — vision description and response generation are independent components, each with its own Ollama client, model, and timeout (`OLLAMA_VISION_MODEL` / `OLLAMA_MODEL`). This is intentional: the perception layer (landmarks, scoring, state machine, gating) has no dependency on either model, so the VLM or LLM can be swapped for a more specialized one without touching perception logic.
 
-Crie e ative um ambiente virtual:
+**Live overlay** — face box, eye contours, iris position, and 3D head-pose axes are drawn in real time, alongside state, score, pitch/yaw/roll, and gaze duration.
+
+**Graceful degradation** — if the vision or language model fails, each stage falls back independently to a safe default instead of crashing. A GPU-verification failure is the one error that still halts execution.
+
+**GPU correctness guard** — if an NVIDIA GPU is visible but Ollama reports the model loaded with zero VRAM, the request is rejected instead of silently falling back to CPU.
+
+## Requirements
+
+- Python 3.11+
+- a webcam accessible via OpenCV (if you have multiple webcams, you may need to check which one to use and change the default index inside the code)
+- Ollama running, with `openbmb/minicpm-v4.6` (vision) and `qwen2.5:1.5b` (text) pulled
+> `openbmb/minicpm-v4.6` and `qwen2.5:1.5b` was chosen because it worked well in 4GB of RAM in a NVIDIA 3050ti. You can select other models if you have a better graphics card (or worse).
+
+On startup the program checks the Ollama API and required models, and exits with a fix-it message before opening the webcam if anything is missing.
+
+## Installation
 
 ```bash
 python -m venv venv
-source venv/bin/activate
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-```
 
-No Windows, ative o ambiente com `venv\Scripts\activate`.
-
-Instale o Ollama conforme as instruções da sua plataforma e baixe os modelos:
-
-```bash
-ollama pull qwen3-vl:2b-instruct
-ollama pull qwen2.5:3b
-```
-
-O servidor pode ser iniciado manualmente quando necessário:
-
-```bash
+ollama pull openbmb/minicpm-v4.6
+ollama pull qwen2.5:1.5b
 ollama serve
 ```
 
-## Execução
-
-Para validar somente a geração textual:
+## Running
 
 ```bash
-python -m src.text_app
+python -m src.text_app   # text-only path
+python -m src.app        # full webcam pipeline
 ```
 
-Para executar o pipeline com webcam:
+Press `q` or `Esc` to quit (`Ctrl+C` also works). On exit, the app asks Ollama to unload its models immediately, freeing standby RAM/VRAM.
 
-```bash
-python -m src.app
-```
+## Ollama configuration
 
-Pressione `q` ou `Esc` na janela de vídeo para encerrar. `Ctrl+C` também executa
-o fluxo normal de limpeza. Ao sair, o projeto solicita ao Ollama que descarregue
-imediatamente os modelos utilizados; o serviço Ollama permanece ativo, mas os
-modelos deixam de ocupar RAM em standby.
-
-## Configuração do Ollama
-
-| Variável | Padrão | Descrição |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Endereço da API local |
-| `OLLAMA_MODEL` | `qwen2.5:3b` | Modelo de resposta textual |
-| `OLLAMA_VISION_MODEL` | `qwen3-vl:2b-instruct` | Modelo de descrição visual |
-| `OLLAMA_TIMEOUT_SECONDS` | `30` | Timeout da resposta textual |
-| `OLLAMA_VISION_TIMEOUT_SECONDS` | `60` | Timeout da descrição visual |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local API address |
+| `OLLAMA_MODEL` | `qwen2.5:1.5b` | Text response model |
+| `OLLAMA_VISION_MODEL` | `openbmb/minicpm-v4.6` | Scene description model |
+| `OLLAMA_TIMEOUT_SECONDS` | `30` | Text response timeout |
+| `OLLAMA_VISION_TIMEOUT_SECONDS` | `60` | Scene description timeout |
+| `ATTENTION_LOG_DIR` | `logs/` | Telemetry log directory |
 
-Exemplo:
+Attention thresholds, gaze duration, release window, cooldown, camera index, and window name are tunable constants at the top of `src/app.py`.
 
-```bash
-OLLAMA_MODEL=qwen2.5:7b OLLAMA_TIMEOUT_SECONDS=45 python -m src.text_app
-```
-
-## Testes
-
-Com o ambiente virtual ativo:
+## Testing
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## Profiling e telemetria
+Covers attention-state classification, the landmark detector, the Ollama client and preflight check, response generation, scene description, and the profiling layer.
 
-O pipeline emite medições de alta precisão com `time.perf_counter()` sem alterar
-suas decisões funcionais. Os eventos são salvos em
-`logs/performance-<data>-<pid>.jsonl`, com um objeto JSON independente por linha.
-O formato inclui versão de schema, timestamp UTC, identificador da execução,
-tipo de evento, componente e métricas numéricas, facilitando leitura por scripts,
-LLMs e ferramentas de análise:
+## Profiling and telemetry
 
-```json
-{
-  "schema_version": "1.0",
-  "event": "step_metric",
-  "component": "vlm",
-  "step": "qwen_vlm_total",
-  "metrics": {"wall_seconds": 2.7}
-}
-```
+The pipeline logs high-precision, per-step measurements to `logs/performance-<date>-<pid>.jsonl` (one JSON object per line) without affecting functional decisions — wall/CPU time, tokens, VRAM, and an aggregated `interaction_report` per interaction (latency, CPU, RAM, GPU). CPU/RAM telemetry uses `psutil`; GPU telemetry (utilization, VRAM, power, temperature) uses `pynvml` and degrades to `null` fields on machines without an NVIDIA GPU. Resources are sampled every 200ms during inference so long model waits don't hide resource spikes. New functions can be instrumented with the `@profile_step("name")` decorator.
 
-O Qwen visual usa o componente `vlm`; o Qwen textual usa `llm`. Cada um registra
-separadamente tempo até o primeiro fragmento, tempo total, tokens, tempos nativos
-do Ollama e VRAM atribuída ao modelo. Ao final da interação, um evento
-`interaction_report` agrega latência, CPU média, RSS, RAM, GPU e VRAM.
+## Limitations and responsible use
 
-O suporte de CPU/RAM usa `psutil`. A telemetria NVIDIA usa `pynvml`, fornecido
-pelo pacote `nvidia-ml-py`, e depende de driver NVIDIA e NVML acessíveis. Em
-máquinas sem GPU NVIDIA ou sem NVML, o restante do profiling continua ativo e
-os campos de GPU são registrados como `null`.
+- The attention index is a heuristic, not an objective measure of attention.
+- Lighting, camera quality, occlusions, glasses, and individual traits affect estimates.
+- Looking at the camera does not imply interest, consent, or intent to interact.
+- Local model responses can contain errors.
+- No per-user calibration or scientific evaluation yet.
 
-As requisições enviam `num_gpu=-1`, opção do Ollama para offload dinâmico de
-todas as camadas possíveis. Após a inferência, `/api/ps` confirma a VRAM do
-modelo. Se NVML detectar uma GPU NVIDIA local e o Ollama reportar zero VRAM, a
-resposta é rejeitada em vez de continuar silenciosamente em CPU.
+Any evolution toward experiments with people should include consent, privacy safeguards, ethical review, and bias evaluation.
 
-Durante cada interação, os recursos são amostrados a cada 200 ms para que esperas
-longas dos modelos não escondam picos de RAM ou atividade de GPU. Métricas NVIDIA
-são agregadas entre todas as GPUs visíveis; uso por núcleo representa a carga do
-sistema observada em cada núcleo, enquanto `cpu_process` mede somente o processo
-Python e pode ultrapassar 100% quando utiliza múltiplos núcleos.
+## Project status
 
-Novas funções síncronas podem ser instrumentadas sem alterar sua implementação:
-
-```python
-from src.profiling import profile_step
-
-@profile_step("minha_etapa")
-def executar() -> None:
-    ...
-```
-
-Os logs de captura e detecção são gravados a cada frame e, portanto, são
-intencionalmente verbosos. Isso é adequado para sessões controladas de profiling,
-mas deve ser considerado ao coletar execuções longas.
-
-## Limitações e uso responsável
-
-- O índice de atenção é uma heurística, não uma medida objetiva de atenção.
-- Iluminação, câmera, oclusões, óculos e características individuais afetam as
-  estimativas.
-- Olhar para a câmera não implica interesse, consentimento ou intenção de
-  interagir.
-- As respostas dos modelos locais podem conter erros.
-- O protótipo ainda não possui calibração por usuário nem avaliação científica.
-
-Qualquer evolução para experimentos com pessoas deve incluir consentimento,
-privacidade, revisão ética, métricas claras e avaliação dos vieses do sistema.
-
-## Estado do projeto
-
-O repositório está em desenvolvimento exploratório. Interfaces, limiares,
-modelos e decisões de arquitetura podem mudar conforme os experimentos avancem.
+Exploratory development — interfaces, thresholds, models, and architecture may change as experiments progress.
