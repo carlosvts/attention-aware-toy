@@ -4,7 +4,7 @@ import sys
 
 from .ollama_client import DEFAULT_MODEL, OllamaClient, OllamaError
 
-DEFAULT_VISION_MODEL = "qwen3-vl:2b-instruct"
+DEFAULT_VISION_MODEL = "openbmb/minicpm-v4.6"
 
 
 def _configured_clients(include_vision: bool) -> list[OllamaClient]:

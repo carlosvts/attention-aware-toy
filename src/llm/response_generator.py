@@ -8,9 +8,14 @@ from src.profiling import profile_block, profile_step
 from .ollama_client import OllamaClient, OllamaError, OllamaGPUError
 
 FALLBACK_RESPONSE = (
-    "[FAALBACK] Oi, percebi que você está olhando para mim. Posso ajudar em algo?"
+    "[FALLBACK] Oi, voce está olhando para mim! Como posso te ajudar?"
 )
-SYSTEM_PROMPT = "Você é um robô social assistivo."
+SYSTEM_PROMPT = (
+    "Você é um robô social assistivo. "
+    "Responda em português brasileiro, de forma curta, amigável e contextual. "
+    "Use apenas os fatos visuais fornecidos. "
+    "Não invente detalhes."    
+)
 
 
 @profile_step("qwen_llm_pipeline")
@@ -23,12 +28,16 @@ def generate_response(
     if not scene_description.strip():
         raise ValueError("Scene description cannot be empty")
 
-    user_prompt = f"""Estado de atenção do usuário: {attention_state.name}
-Duração do olhar: {max(0.0, gaze_duration):.1f}s
-Cena observada: {scene_description.strip()}
+    user_prompt = (
+         f"""Estado de atenção do usuário: {attention_state.name}
+         Duração do olhar: {max(0.0, gaze_duration):.1f}s
 
-Responda de forma curta, amigável e contextual.
-Não mencione detalhes incertos da imagem."""
+         Fatos visuais observados:
+         {scene_description.strip()}
+
+         Gere uma resposta curta para a pessoa."""
+    )
+
     try:
         with profile_block("qwen_llm_request"):
             return OllamaClient.from_environment().chat(

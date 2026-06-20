@@ -10,22 +10,29 @@ from numpy.typing import NDArray
 from src.llm.ollama_client import OllamaClient, OllamaError, OllamaGPUError
 from src.profiling import profile_block, profile_step
 
-DEFAULT_VISION_MODEL = "qwen3-vl:2b-instruct"
+MAX_DIMENSION = 512
+DEFAULT_VISION_MODEL = "openbmb/minicpm-v4.6"
 DEFAULT_VISION_TIMEOUT_SECONDS = 60.0
-FALLBACK_DESCRIPTION = "Vejo uma pessoa em frente à câmera."
-SYSTEM_PROMPT = """Você interpreta a câmera de um robô social.
-Descreva somente o que estiver visível, em português brasileiro e em uma frase
-curta e objetiva. Priorize pessoas, gestos, posição e objetos relevantes.
-Não faça suposições sobre identidade, intenção, emoção ou direção do olhar."""
-
+FALLBACK_DESCRIPTION = "A person is in front of the camera"
+SYSTEM_PROMPT = (
+    "You are the vision module of a social robot. "
+    "Describe only visible facts from the image. "
+    "Do not infer identity, emotion, intention, or relationship. "
+    "Return only the requested fields in English."
+    "person: yes/no"
+    "people_count: number"
+    "objects: comma-separated visible objects or none"
+    "gesture_or_pose: short phrase"
+    "scene: short phrase"
+)
 
 def _encode_frame(frame: NDArray[np.uint8]) -> str:
     """Resize and encode a BGR frame as base64 JPEG for Ollama."""
     with profile_block("vl_image_preprocess"):
         height, width = frame.shape[:2]
         largest_dimension = max(height, width)
-        if largest_dimension > 1024:
-            scale = 1024 / largest_dimension
+        if largest_dimension > MAX_DIMENSION:
+            scale = MAX_DIMENSION / largest_dimension
             frame = cv2.resize(
                 frame,
                 (int(width * scale), int(height * scale)),
