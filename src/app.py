@@ -1,6 +1,8 @@
-"""Webcam application for the social-perception HRI MVP."""
+"""Threaded webcam app for the attention-triggered expression pipeline."""
 
-from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from queue import Empty, Full, Queue
+from threading import Event, Lock, Thread
 import time
 
 import cv2
@@ -10,226 +12,279 @@ from numpy.typing import NDArray
 from src.attention import (
     AttentionDetector,
     AttentionResult,
-    AttentionSessionGate,
     AttentionState,
     GazeDurationTracker,
 )
-from src.llm import ensure_ollama_ready, generate_response, unload_models
-from src.profiling import profile_block, profile_interaction
-from src.vision import describe_scene
+from src.debug import draw_attention_overlay, draw_emotion_overlay, show_or_close
+from src.emotions import EmotionDetector, EmotionState
+from src.llm.mocks import GestureDescriptionMock, LLMResponseMock, MudraDetectorMock
 
 CAMERA_INDEX = 0
 ATTENTION_THRESHOLD = 0.7
 ATTENTION_DURATION_SECONDS = 1.0
-ATTENTION_RELEASE_SECONDS = 1.0
 COOLDOWN_SECONDS = 5.0
-WINDOW_NAME = "Social Perception HRI"
+
+SHOW_CAMERA_WINDOW = True
+SHOW_EMOTION_SNAPSHOT_WINDOW = True
+CAMERA_WINDOW_NAME = "Camera"
+EMOTION_SNAPSHOT_WINDOW_NAME = "Emotion Snapshot"
 
 
-def _draw_attention_features(
-    frame: NDArray[np.uint8], result: AttentionResult
+@dataclass(frozen=True)
+class FramePacket:
+    frame: NDArray[np.uint8]
+    timestamp: float
+
+
+@dataclass(frozen=True)
+class AttentionPacket:
+    result: AttentionResult
+    state: AttentionState
+    gaze_duration: float
+
+
+@dataclass(frozen=True)
+class EmotionSnapshot:
+    frame: NDArray[np.uint8]
+    emotion: EmotionState | None
+
+
+class LatestValue:
+    """Thread-safe single-slot storage for live video state."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._value = None
+
+    def set(self, value) -> None:
+        with self._lock:
+            self._value = value
+
+    def get(self):
+        with self._lock:
+            return self._value
+
+
+def _put_latest(queue: Queue[FramePacket], packet: FramePacket) -> None:
+    if queue.full():
+        try:
+            queue.get_nowait()
+        except Empty:
+            pass
+    try:
+        queue.put_nowait(packet)
+    except Full:
+        pass
+
+
+def _camera_worker(
+    stop_event: Event,
+    latest_frame: LatestValue,
+    attention_frames: Queue[FramePacket],
 ) -> None:
-    """Draw the facial evidence used by the attention score."""
-    features = result.features
-    if features is None:
-        return
-
-    eye_color = (80, 220, 80)
-    iris_color = (255, 80, 220)
-    nose_color = (0, 220, 255)
-    for contour in (features.right_eye, features.left_eye):
-        cv2.polylines(
-            frame,
-            [np.asarray(contour, dtype=np.int32)],
-            True,
-            eye_color,
-            1,
-            cv2.LINE_AA,
-        )
-    for center, radius in (features.right_iris, features.left_iris):
-        cv2.circle(frame, center, radius, iris_color, 2, cv2.LINE_AA)
-        cv2.circle(frame, center, 2, iris_color, -1, cv2.LINE_AA)
-
-    cv2.line(
-        frame,
-        features.nose_reference[0],
-        features.nose_reference[1],
-        nose_color,
-        1,
-        cv2.LINE_AA,
-    )
-    cv2.drawMarker(
-        frame,
-        features.nose,
-        nose_color,
-        cv2.MARKER_CROSS,
-        12,
-        2,
-        cv2.LINE_AA,
-    )
-
-    origin, x_axis, y_axis, z_axis = features.head_axes
-    for endpoint, axis_color, name in (
-        (x_axis, (0, 0, 255), "X"),
-        (y_axis, (0, 255, 0), "Y"),
-        (z_axis, (255, 0, 0), "Z"),
-    ):
-        cv2.arrowedLine(
-            frame, origin, endpoint, axis_color, 2, cv2.LINE_AA, tipLength=0.18
-        )
-        cv2.putText(
-            frame,
-            name,
-            endpoint,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            axis_color,
-            1,
-            cv2.LINE_AA,
-        )
-
-
-def generate_interaction(
-    frame: NDArray[np.uint8],
-    attention_state: AttentionState,
-    gaze_duration: float,
-) -> tuple[str, str]:
-    """Describe a frame and generate the robot's textual response."""
-    with profile_interaction():
-        scene_description = describe_scene(frame)
-        response = generate_response(
-            scene_description, attention_state, gaze_duration
-        )
-        return scene_description, response
-
-
-def draw_overlay(
-    frame: NDArray[np.uint8],
-    result: AttentionResult,
-    attention_state: AttentionState,
-    gaze_duration: float,
-) -> None:
-    """Draw face location and attention state on the preview frame."""
-    state_colors = {
-        AttentionState.NO_FACE: (120, 120, 120),
-        AttentionState.FACE_DETECTED: (0, 180, 255),
-        AttentionState.LOOKING_BRIEFLY: (0, 220, 220),
-        AttentionState.DISTRACTED: (0, 140, 255),
-        AttentionState.ATTENDING: (80, 220, 80),
-    }
-    color = state_colors[attention_state]
-    if result.face_box is not None:
-        x, y, width, height = result.face_box
-        cv2.rectangle(frame, (x, y), (x + width, y + height), color, 2)
-    _draw_attention_features(frame, result)
-
-    label = f"state: {attention_state.name}  score: {result.score:.2f}"
-    cv2.putText(frame, label, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-    if result.components is not None:
-        detail = (
-            f"head: {result.components.head_pose:.2f}  "
-            f"gaze: {result.components.iris_direction:.2f}"
-        )
-        cv2.putText(
-            frame, detail, (20, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2
-        )
-    if result.features is not None:
-        pitch, yaw, roll = result.features.head_angles
-        pose = f"pitch: {pitch:+.0f}  yaw: {yaw:+.0f}  roll: {roll:+.0f} deg"
-        cv2.putText(
-            frame, pose, (20, 98), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2
-        )
-    cv2.putText(
-        frame,
-        f"gaze duration: {gaze_duration:.1f}s",
-        (20, 130),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        color,
-        2,
-    )
-
-
-def run() -> None:
-    """Run the webcam attention and response loop."""
-    ensure_ollama_ready()
     camera = cv2.VideoCapture(CAMERA_INDEX)
     if not camera.isOpened():
+        print(f"Não foi possível abrir a webcam no índice {CAMERA_INDEX}.")
+        stop_event.set()
         camera.release()
-        raise RuntimeError(
-            f"Não foi possível abrir a webcam no índice {CAMERA_INDEX}."
-        )
+        return
 
+    try:
+        while not stop_event.is_set():
+            ok, frame = camera.read()
+            if not ok:
+                print("Não foi possível capturar um frame da webcam.")
+                stop_event.set()
+                break
+
+            packet = FramePacket(frame=frame.copy(), timestamp=time.monotonic())
+            latest_frame.set(packet)
+            _put_latest(
+                attention_frames,
+                FramePacket(frame=frame.copy(), timestamp=packet.timestamp),
+            )
+    finally:
+        camera.release()
+
+
+def _attention_worker(
+    stop_event: Event,
+    attention_frames: Queue[FramePacket],
+    latest_attention: LatestValue,
+    emotion_events: Queue[FramePacket],
+) -> None:
     gaze_tracker = GazeDurationTracker()
-    session_gate = AttentionSessionGate(
-        threshold=ATTENTION_THRESHOLD,
-        release_duration=ATTENTION_RELEASE_SECONDS,
-    )
-    last_response_at = float("-inf")
-    response_worker = ThreadPoolExecutor(max_workers=1)
-    pending_response: Future[tuple[str, str]] | None = None
+    last_trigger_at = float("-inf")
 
     try:
         with AttentionDetector() as detector:
-            while True:
-                with profile_block("frame_capture"):
-                    ok, frame = camera.read()
-                if not ok:
-                    print("Não foi possível capturar um frame da webcam.")
-                    break
+            while not stop_event.is_set():
+                try:
+                    packet = attention_frames.get(timeout=0.05)
+                except Empty:
+                    continue
 
-                now = time.monotonic()
-                result = detector.process(frame)
-                attention_state = AttentionState.classify(
-                    result.score, face_detected=result.face_box is not None
+                result = detector.process(packet.frame)
+                state = AttentionState.classify(
+                    result.score,
+                    face_detected=result.face_box is not None,
                 )
-                gaze_duration = gaze_tracker.update(attention_state, now)
+                now = time.monotonic()
+                gaze_duration = gaze_tracker.update(state, now)
                 sustained_attention = (
-                    attention_state is AttentionState.ATTENDING
+                    state is AttentionState.ATTENDING
                     and gaze_duration >= ATTENTION_DURATION_SECONDS
                 )
-                new_attention_session = session_gate.update(
-                    score=result.score,
-                    timestamp=now,
-                    sustained_attention=sustained_attention,
+
+                latest_attention.set(
+                    AttentionPacket(
+                        result=result,
+                        state=state,
+                        gaze_duration=gaze_duration,
+                    )
                 )
 
-                if pending_response is not None and pending_response.done():
-                    try:
-                        scene_description, response = pending_response.result()
-                        print(f"Cena: {scene_description}")
-                        print(f"Resposta: {response}")
-                    except Exception as error:
-                        print(f"Erro inesperado ao gerar resposta: {error}")
-                    pending_response = None
-
-                cooldown_finished = now - last_response_at >= COOLDOWN_SECONDS
                 if (
-                    new_attention_session
-                    and cooldown_finished
-                    and pending_response is None
+                    sustained_attention
+                    and now - last_trigger_at >= COOLDOWN_SECONDS
+                    and not emotion_events.full()
                 ):
-                    captured_frame = frame.copy()
-                    print("Processando cena...")
-                    pending_response = response_worker.submit(
-                        generate_interaction,
-                        captured_frame,
-                        attention_state,
-                        gaze_duration,
+                    _put_latest(
+                        emotion_events,
+                        FramePacket(frame=packet.frame.copy(), timestamp=now),
                     )
-                    last_response_at = now
+                    last_trigger_at = now
+    except Exception as error:
+        print(f"Erro na thread de atenção: {error}")
+        stop_event.set()
 
-                draw_overlay(frame, result, attention_state, gaze_duration)
-                cv2.imshow(WINDOW_NAME, frame)
-                if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
-                    break
+
+def _event_worker(
+    stop_event: Event,
+    emotion_events: Queue[FramePacket],
+    latest_snapshot: LatestValue,
+) -> None:
+    mudra_detector = MudraDetectorMock()
+    gesture_description = GestureDescriptionMock()
+    llm_response = LLMResponseMock()
+    number_responses = 0
+    try:
+        with EmotionDetector() as emotion_detector:
+            while not stop_event.is_set():
+                try:
+                    packet = emotion_events.get(timeout=0.05)
+                except Empty:
+                    continue
+
+                emotion = emotion_detector.detect(packet.frame)
+                mudra = mudra_detector.detect(packet.frame)
+                description = gesture_description.describe(mudra, emotion)
+                response = llm_response.generate(description)
+                expression = emotion.label if emotion else "unknown"
+                confidence = emotion.confidence if emotion else 0.0
+                
+                ###################################################
+                # Debug prints
+                print()
+                print("="*50)
+                print("Interaction Number: ", number_responses)
+                print("attention detected", flush=True)
+                print(
+                    f"apparent_expression={expression} confidence={confidence:.3f}",
+                    flush=True,
+                )
+                print(
+                    f"mock_mudra={mudra.label} confidence={mudra.confidence:.3f}",
+                    flush=True,
+                )
+                print(f"mock_gesture_description={description}", flush=True)
+                print(f"mock_llm_response={response}", flush=True)
+                print("="*50)
+                print()
+                number_responses += 1
+                # End debug prints
+                ###################################################
+
+                snapshot = packet.frame.copy()
+                draw_emotion_overlay(snapshot, emotion)
+                latest_snapshot.set(EmotionSnapshot(frame=snapshot, emotion=emotion))
+    except Exception as error:
+        print(f"Erro na thread de evento: {error}")
+        stop_event.set()
+
+
+def run() -> None:
+    """Run the threaded webcam attention loop."""
+    stop_event = Event()
+    latest_frame = LatestValue()
+    latest_attention = LatestValue()
+    latest_snapshot = LatestValue()
+    attention_frames: Queue[FramePacket] = Queue(maxsize=1)
+    emotion_events: Queue[FramePacket] = Queue(maxsize=1)
+
+    workers = (
+        Thread(
+            target=_camera_worker,
+            args=(stop_event, latest_frame, attention_frames),
+            name="camera-worker",
+            daemon=True,
+        ),
+        Thread(
+            target=_attention_worker,
+            args=(stop_event, attention_frames, latest_attention, emotion_events),
+            name="attention-worker",
+            daemon=True,
+        ),
+        Thread(
+            target=_event_worker,
+            args=(stop_event, emotion_events, latest_snapshot),
+            name="event-worker",
+            daemon=True,
+        ),
+    )
+
+    for worker in workers:
+        worker.start()
+
+    try:
+        cv2.namedWindow(CAMERA_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(EMOTION_SNAPSHOT_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.moveWindow(CAMERA_WINDOW_NAME, 40, 80)
+        cv2.moveWindow(EMOTION_SNAPSHOT_WINDOW_NAME, 760, 80)
+
+        while not stop_event.is_set():
+            frame_packet = latest_frame.get()
+            attention_packet = latest_attention.get()
+            snapshot_packet = latest_snapshot.get()
+
+            if frame_packet is not None:
+                frame = frame_packet.frame.copy()
+                if attention_packet is not None:
+                    draw_attention_overlay(
+                        frame,
+                        attention_packet.result,
+                        attention_packet.state,
+                        attention_packet.gaze_duration,
+                    )
+                show_or_close(CAMERA_WINDOW_NAME, SHOW_CAMERA_WINDOW, frame)
+
+            if snapshot_packet is not None:
+                show_or_close(
+                    EMOTION_SNAPSHOT_WINDOW_NAME,
+                    SHOW_EMOTION_SNAPSHOT_WINDOW,
+                    snapshot_packet.frame,
+                )
+
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                stop_event.set()
+                break
+
+            time.sleep(0.001)
     finally:
-        camera.release()
+        stop_event.set()
+        for worker in workers:
+            worker.join(timeout=2.0)
         cv2.destroyAllWindows()
-        # A running request cannot be cancelled. Wait for it before unloading,
-        # otherwise it could reload the model after the cleanup request.
-        response_worker.shutdown(wait=True, cancel_futures=True)
-        unload_models()
 
 
 if __name__ == "__main__":
