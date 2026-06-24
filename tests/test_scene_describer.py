@@ -5,13 +5,13 @@ from unittest.mock import patch
 
 import numpy as np
 
-from src.vision.scene_describer import describe_scene
+from src.llm.scene_describer import describe_scene
 
 
 class SceneDescriberProfilingTests(unittest.TestCase):
     @patch("src.profiling.record_step")
-    @patch("src.vision.scene_describer._encode_frame", return_value="image")
-    @patch("src.vision.scene_describer.OllamaClient.from_environment")
+    @patch("src.llm.scene_describer._encode_frame", return_value="image")
+    @patch("src.llm.scene_describer.OllamaClient.from_environment")
     def test_labels_visual_model_as_vlm(
         self, client_factory, encode_frame, record_step
     ) -> None:
