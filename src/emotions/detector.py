@@ -13,7 +13,7 @@ from .types import EmotionState
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
-
+# averages the score of a specific blendshape 
 def _score(blendshapes: dict[str, float], *names: str) -> float:
     if not names:
         return 0.0
@@ -24,6 +24,7 @@ def classify_expression(blendshapes: dict[str, float]) -> EmotionState:
     """Map MediaPipe blendshapes to cautious apparent-expression labels."""
     smile = _score(blendshapes, "mouthSmileLeft", "mouthSmileRight")
     frown = _score(blendshapes, "mouthFrownLeft", "mouthFrownRight")
+    eye_squint = _score(blendshapes, "eyeSquintLeft", "eyeSquintRight")
 
     # For surprising
     brow_down = _score(blendshapes, "browDownLeft", "browDownRight")
@@ -33,22 +34,57 @@ def classify_expression(blendshapes: dict[str, float]) -> EmotionState:
         "browOuterUpRight",
         "browOuterUpLeft",
     )
+    brow_inner_up = _score(blendshapes, "browInnerUp")
+    brow_outer_up = _score(blendshapes, "browOuterUpRight", "browOuterUpLeft")
     eye_wide = _score(blendshapes, "eyeWideLeft", "eyeWideRight")
     jaw_open = _score(blendshapes, "jawOpen")
     surprised = (
-        0.45 * brow_up
-        + 0.35 * eye_wide
-        + 0.20 * jaw_open
+        0.45 * brow_outer_up
+        + 0.40 * eye_wide
+        + 0.15 * jaw_open
+    )
+    shrug = _score(blendshapes, "mouthShrugUpper", "mouthShrugLower")
+    mouth_shrug_lower = _score(blendshapes, "mouthShrugLower")
+    mouth_press = _score(blendshapes, "mouthPressLeft", "mouthPressRight")
+    nose_sneer = _score(
+        blendshapes,
+        "noseSneerLeft",
+        "noseSneerRight",
+    )
+    upper_lip = _score(
+        blendshapes,
+        "mouthUpperUpLeft",
+        "mouthUpperUpRight",
+    )
+    negative = max(
+        0.55 * mouth_press +
+        0.25 * frown +
+        0.20 * brow_down,
+
+        0.50 * mouth_press +
+        0.30 * nose_sneer +
+        0.20 * upper_lip,
+
+        0.60 * frown +
+        0.40 * mouth_shrug_lower,
     )
 
     candidates = {
         "smiling_expression": smile,
-        "frowning_expression": frown,
-        "focused_expression": brow_down,
         "surprised_expression": surprised,
+        "negative_expression": negative,
     }
+    print(f"smile={smile:.3f} frown={frown:.3f} brow_down={brow_down:.3f} "
+      f"mouth_press={mouth_press:.3f} shrug={shrug:.3f} negative={negative:.3f}")
+
+    thresholds = {
+        "smiling_expression": 0.30,
+        "surprised_expression": 0.22,
+        "negative_expression": 0.18,
+    }
+
     label, confidence = max(candidates.items(), key=lambda item: item[1])
-    if confidence < 0.28:
+    if confidence < thresholds[label]:
         label = "neutral_expression"
         confidence = max(0.45, 1.0 - max(candidates.values()))
 
@@ -94,6 +130,7 @@ class EmotionDetector:
         if not result.face_landmarks or not result.face_blendshapes:
             return None
 
+        # 0 is the first face
         blendshapes = {
             category.category_name: float(category.score)
             for category in result.face_blendshapes[0]
