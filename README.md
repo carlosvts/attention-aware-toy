@@ -1,102 +1,136 @@
 # Attention-Aware Toy
 
-An experimental attention-perception prototype for Human-Robot Interaction (HRI). It combines computer vision with locally-run multimodal models to explore how a social robot could perceive visual engagement and decide when to start an interaction.
+Toy project for an attention-triggered Human-Robot Interaction pipeline.
 
-This is a *toy project* for experimentation and learning — not a production system. It performs no identity recognition and should not be used to infer intent, emotion, or mental state.
+This is an experimental prototype, not a production system. It does not identify people and must not be used to infer a person's real emotion, intent, or mental state. Facial-expression output is only an apparent-expression heuristic from visible blendshapes.
 
-## Overview
+## Current Pipeline
 
-A webcam feed runs through a face-landmark pipeline that scores attention every frame, classifies it into a discrete state, and tracks how long that state holds. When attention is sustained, the system asynchronously: captures the frame, describes the scene with a local vision-language model, and generates a short reply conditioned on both the scene and the current attention state — while the live overlay keeps rendering uninterrupted.
+The main app runs camera capture, attention detection, and event processing in separate threads. Emotion detection is event-driven:
 
-## How it works
-
-**Face and landmark detection** — MediaPipe FaceLandmarker tracks up to 4 faces per frame; the largest is used as the active subject.
-
-**Attention scoring** — a weighted score combines head pose (40%), iris direction (30%), nose position (15%), eye symmetry (10%), and face position (5%), derived from landmarks and the 3D facial transformation matrix.
-
-**Attention state machine** — the score is classified each frame into `NO_FACE`, `FACE_DETECTED` (≤0.30), `LOOKING_BRIEFLY` (≤0.50), `DISTRACTED` (≤0.70), or `ATTENDING` (>0.70).
-
-**Session gating** — sustained attention triggers one interaction per "session"; a new one is only allowed after attention drops below threshold and stays there for a release window, preventing repeated firing during a single gaze.
-
-**Asynchronous pipeline** — perception and generation run on a background thread, so the webcam loop and overlay never block while a response is pending.
-
-**Scene description** — a local vision-language model (MiniCPM-V, via Ollama) returns a constrained, structured description (person present, count, objects, gesture, scene) from a downscaled frame, explicitly barred from inferring identity, emotion, or intention.
-
-**Contextual response generation** — a local language model (Qwen2.5, via Ollama) turns that description into a short reply, conditioned on the current attention state and gaze duration.
-
-**Modular VLM/LLM boundary** — vision description and response generation are independent components, each with its own Ollama client, model, and timeout (`OLLAMA_VISION_MODEL` / `OLLAMA_MODEL`). This is intentional: the perception layer (landmarks, scoring, state machine, gating) has no dependency on either model, so the VLM or LLM can be swapped for a more specialized one without touching perception logic.
-
-**Live overlay** — face box, eye contours, iris position, and 3D head-pose axes are drawn in real time, alongside state, score, pitch/yaw/roll, and gaze duration.
-
-**Graceful degradation** — if the vision or language model fails, each stage falls back independently to a safe default instead of crashing. A GPU-verification failure is the one error that still halts execution.
-
-**GPU correctness guard** — if an NVIDIA GPU is visible but Ollama reports the model loaded with zero VRAM, the request is rejected instead of silently falling back to CPU.
-
-## Requirements
-
-- Python 3.11+
-- a webcam accessible via OpenCV (if you have multiple webcams, you may need to check which one to use and change the default index inside the code)
-- Ollama running, with `openbmb/minicpm-v4.6` (vision) and `qwen2.5:1.5b` (text) pulled
-> `openbmb/minicpm-v4.6` and `qwen2.5:1.5b` was chosen because it worked well in 4GB of RAM in a NVIDIA 3050ti. You can select other models if you have a better graphics card (or worse).
-
-On startup the program checks the Ollama API and required models, and exits with a fix-it message before opening the webcam if anything is missing.
-
-## Installation
-
-```bash
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-
-ollama pull openbmb/minicpm-v4.6
-ollama pull qwen2.5:1.5b
-ollama serve
+```text
+attention detected
+  -> screenshot/frame
+  -> apparent facial-expression detection
+  -> mock mudra detection
+  -> mock gesture description
+  -> terminal output
 ```
+
+The main app does not run emotion detection on every frame. It only calls `EmotionDetector.detect()` after sustained attention triggers an interaction event.
+
+## Structure
+
+```text
+src/
+  app.py
+  __init__.py
+  attention/
+    __init__.py
+    detector.py
+    tracker.py
+  emotions/
+    __init__.py
+    detector.py
+    types.py
+  llm/
+    __init__.py
+    lifecycle.py
+    mocks.py
+    ollama_client.py
+    response_generator.py
+    scene_describer.py
+  debug/
+    __init__.py
+    windows.py
+  profiling.py
+  text_app.py
+```
+
+There is no final `src/state` or `src/perception` module. Attention, emotion, debug windows, and LLM/VLM-related code are separated by responsibility.
+
+## Modules
+
+**attention**: MediaPipe face-landmark attention score, gaze duration, and sustained-attention gating.
+
+**emotions**: MediaPipe Face Landmarker blendshape heuristics. `EmotionDetector` loads `models/face_landmarker.task` with `output_face_blendshapes=True`, receives OpenCV BGR frames, converts to RGB, and returns `EmotionState | None`.
+
+**llm**: current Ollama/VLM/LLM code plus local mocks for unavailable mudra and gesture-description modules.
+
+**debug**: OpenCV drawing and `cv2.imshow` helpers. Detector logic does not own window rendering.
+
+## Apparent Expression Heuristic
+
+`src/emotions/detector.py` maps blendshapes conservatively:
+
+- `mouthSmileLeft + mouthSmileRight` -> `smiling_expression`
+- `mouthFrownLeft + mouthFrownRight` -> `frowning_expression`
+- `browDownLeft + browDownRight` -> `focused_expression`
+- `eyeWideLeft + eyeWideRight + jawOpen` -> `surprised_expression`
+- otherwise -> `neutral_expression`
+
+Terminal and overlay text use cautious labels such as `apparent_expression=smiling_expression` and `apparent_expression=neutral_expression`.
 
 ## Running
 
+Install dependencies:
+
 ```bash
-python -m src.text_app   # text-only path
-python -m src.app        # full webcam pipeline
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-Press `q` or `Esc` to quit (`Ctrl+C` also works). On exit, the app asks Ollama to unload its models immediately, freeing standby RAM/VRAM.
+Run the attention-triggered app:
 
-## Ollama configuration
+```bash
+python -m src.app
+```
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local API address |
-| `OLLAMA_MODEL` | `qwen2.5:1.5b` | Text response model |
-| `OLLAMA_VISION_MODEL` | `openbmb/minicpm-v4.6` | Scene description model |
-| `OLLAMA_TIMEOUT_SECONDS` | `30` | Text response timeout |
-| `OLLAMA_VISION_TIMEOUT_SECONDS` | `60` | Scene description timeout |
-| `ATTENTION_LOG_DIR` | `logs/` | Telemetry log directory |
+Run the isolated emotion webcam debug script:
 
-Attention thresholds, gaze duration, release window, cooldown, camera index, and window name are tunable constants at the top of `src/app.py`.
+```bash
+python tests/test_emotions.py
+# or
+python -m tests.test_emotions
+```
 
-## Testing
+Press `q` or `Esc` to quit OpenCV windows.
+
+## Windows
+
+Main app:
+
+| Window | Purpose |
+| --- | --- |
+| `Camera` | Live camera frame with attention overlay |
+| `Emotion Snapshot` | Captured frame used for event-driven emotion detection |
+
+Emotion test:
+
+| Window | Purpose |
+| --- | --- |
+| `Emotion Test` | Live webcam frame with apparent-expression overlay |
+| `Emotion Debug` | Apparent-expression metrics and top blendshape scores |
+
+## Tests
+
+Unit tests:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Covers attention-state classification, the landmark detector, the Ollama client and preflight check, response generation, scene description, and the profiling layer.
+Manual webcam emotion test:
 
-## Profiling and telemetry
+```bash
+python tests/test_emotions.py
+```
 
-The pipeline logs high-precision, per-step measurements to `logs/performance-<date>-<pid>.jsonl` (one JSON object per line) without affecting functional decisions — wall/CPU time, tokens, VRAM, and an aggregated `interaction_report` per interaction (latency, CPU, RAM, GPU). CPU/RAM telemetry uses `psutil`; GPU telemetry (utilization, VRAM, power, temperature) uses `pynvml` and degrades to `null` fields on machines without an NVIDIA GPU. Resources are sampled every 200ms during inference so long model waits don't hide resource spikes. New functions can be instrumented with the `@profile_step("name")` decorator.
+## Limitations
 
-## Limitations and responsible use
-
-- The attention index is a heuristic, not an objective measure of attention.
-- Lighting, camera quality, occlusions, glasses, and individual traits affect estimates.
-- Looking at the camera does not imply interest, consent, or intent to interact.
-- Local model responses can contain errors.
-- No per-user calibration or scientific evaluation yet.
-
-Any evolution toward experiments with people should include consent, privacy safeguards, ethical review, and bias evaluation.
-
-## Project status
-
-Exploratory development — interfaces, thresholds, models, and architecture may change as experiments progress.
+- The attention score is a heuristic, not an objective measure of attention.
+- The emotion module detects apparent facial expression, not real emotion.
+- Lighting, camera quality, occlusions, glasses, and individual differences affect output.
+- Looking at the camera does not imply consent, interest, or intent.
+- Mudra detection and gesture description are currently mocks.

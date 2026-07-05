@@ -11,7 +11,7 @@ from src.llm.ollama_client import OllamaClient, OllamaError, OllamaGPUError
 from src.profiling import profile_block, profile_step
 
 MAX_DIMENSION = 512
-DEFAULT_VISION_MODEL = "openbmb/minicpm-v4.6"
+DEFAULT_VISION_MODEL = "qwen3-vl:2b"
 DEFAULT_VISION_TIMEOUT_SECONDS = 60.0
 FALLBACK_DESCRIPTION = "A person is in front of the camera"
 SYSTEM_PROMPT = """
