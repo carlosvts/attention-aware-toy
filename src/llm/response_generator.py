@@ -50,7 +50,7 @@ Resposta: Esse celular chegou bem perto de mim.
 gesture_or_pose: thumbs-up
 Resposta: Recebi esse sinal de positivo.
 
-apparent_affect: label=focused_expression
+apparent_affect: label=negative_expression
 Resposta: Percebi uma expressão mais séria; vou responder com calma.
 
 Retorne apenas a fala final.
@@ -96,7 +96,7 @@ A fala deve:
 - não falar de olhar/atenção se houver objetos segurados;
 - estar em português brasileiro;
 - não usar aspas;
-- se apparent_affect for focused_expression ou frowning_expression, usar tom mais cauteloso;
+- se apparent_affect for negative_expression, usar tom mais cauteloso;
 - não afirmar emoção real da pessoa.
 """
 
