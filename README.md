@@ -65,12 +65,11 @@ There is no final `src/state` or `src/perception` module. Attention, emotion, de
 `src/emotions/detector.py` maps blendshapes conservatively. Paired
 blendshapes are averaged before the candidate scores are calculated:
 
-- `smiling_expression`: average left/right mouth-smile score, threshold `0.30`;
-- `surprised_expression`: weighted outer-brow raise, eye widening, and jaw opening, threshold `0.22`;
-- `negative_expression`: strongest weighted combination of mouth press, frown, brow lowering, nose sneer, upper-lip raise, and lower-mouth shrug, threshold `0.18`;
+- `positive_expression`: strongest valid smile or surprise pattern;
+- `negative_expression`: strongest coherent tension, nasal-negative, or sadness/displeasure pattern, threshold `0.16`;
 - `neutral_expression`: returned when the strongest candidate does not reach its threshold.
 
-Terminal and overlay text use cautious labels such as `apparent_expression=smiling_expression` and `apparent_expression=neutral_expression`. These labels describe visible facial cues, not a person's internal emotional state.
+Terminal and overlay text use cautious labels such as `apparent_expression=positive_expression` and `apparent_expression=neutral_expression`. These labels describe visible facial cues, not a person's internal emotional state.
 
 ## Requirements
 
