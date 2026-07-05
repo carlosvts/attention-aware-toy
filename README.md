@@ -14,6 +14,7 @@ attention detected
   -> apparent facial-expression detection
   -> mock mudra detection
   -> mock gesture description
+  -> mock LLM response
   -> terminal output
 ```
 
@@ -55,21 +56,28 @@ There is no final `src/state` or `src/perception` module. Attention, emotion, de
 
 **emotions**: MediaPipe Face Landmarker blendshape heuristics. `EmotionDetector` loads `models/face_landmarker.task` with `output_face_blendshapes=True`, receives OpenCV BGR frames, converts to RGB, and returns `EmotionState | None`.
 
-**llm**: current Ollama/VLM/LLM code plus local mocks for unavailable mudra and gesture-description modules.
+**llm**: Ollama VLM/LLM clients plus local mocks used by the current webcam pipeline for mudra detection, gesture description, and response generation.
 
 **debug**: OpenCV drawing and `cv2.imshow` helpers. Detector logic does not own window rendering.
 
 ## Apparent Expression Heuristic
 
-`src/emotions/detector.py` maps blendshapes conservatively:
+`src/emotions/detector.py` maps blendshapes conservatively. Paired
+blendshapes are averaged before the candidate scores are calculated:
 
-- `mouthSmileLeft + mouthSmileRight` -> `smiling_expression`
-- `mouthFrownLeft + mouthFrownRight` -> `frowning_expression`
-- `browDownLeft + browDownRight` -> `focused_expression`
-- `eyeWideLeft + eyeWideRight + jawOpen` -> `surprised_expression`
-- otherwise -> `neutral_expression`
+- `smiling_expression`: average left/right mouth-smile score, threshold `0.30`;
+- `surprised_expression`: weighted outer-brow raise, eye widening, and jaw opening, threshold `0.22`;
+- `negative_expression`: strongest weighted combination of mouth press, frown, brow lowering, nose sneer, upper-lip raise, and lower-mouth shrug, threshold `0.18`;
+- `neutral_expression`: returned when the strongest candidate does not reach its threshold.
 
-Terminal and overlay text use cautious labels such as `apparent_expression=smiling_expression` and `apparent_expression=neutral_expression`.
+Terminal and overlay text use cautious labels such as `apparent_expression=smiling_expression` and `apparent_expression=neutral_expression`. These labels describe visible facial cues, not a person's internal emotional state.
+
+## Requirements
+
+- Python 3.11+
+- a webcam accessible through OpenCV
+- the MediaPipe model files included in `models/`
+- Ollama only when running the optional text-only LLM entry point
 
 ## Running
 
@@ -87,6 +95,16 @@ Run the attention-triggered app:
 python -m src.app
 ```
 
+The webcam app currently uses local mocks after expression detection, so it does not require Ollama.
+
+Run the optional text-only Ollama path:
+
+```bash
+ollama pull qwen2.5:1.5b
+ollama serve
+python -m src.text_app
+```
+
 Run the isolated emotion webcam debug script:
 
 ```bash
@@ -96,6 +114,28 @@ python -m tests.test_emotions
 ```
 
 Press `q` or `Esc` to quit OpenCV windows.
+
+## Configuration
+
+Webcam and interaction settings are constants near the top of `src/app.py`:
+
+| Setting | Default | Purpose |
+| --- | ---: | --- |
+| `CAMERA_INDEX` | `0` | OpenCV camera device |
+| `ATTENTION_THRESHOLD` | `0.7` | Minimum attention score |
+| `ATTENTION_DURATION_SECONDS` | `1.0` | Required sustained-attention time |
+| `COOLDOWN_SECONDS` | `5.0` | Minimum delay between events |
+
+The Ollama-backed modules accept these environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API address |
+| `OLLAMA_MODEL` | `qwen2.5:1.5b` | Text model |
+| `OLLAMA_VISION_MODEL` | `qwen3-vl:2b` | Vision model |
+| `OLLAMA_TIMEOUT_SECONDS` | `30` | Text request timeout |
+| `OLLAMA_VISION_TIMEOUT_SECONDS` | `60` | Vision request timeout |
+| `ATTENTION_LOG_DIR` | `logs/` | Telemetry output directory |
 
 ## Windows
 
@@ -121,6 +161,8 @@ Unit tests:
 python -m unittest discover -s tests -v
 ```
 
+The automated suite covers attention classification and gating, expression heuristics, overlays, Ollama preflight and client behavior, prompts, scene description, and profiling.
+
 Manual webcam emotion test:
 
 ```bash
@@ -134,3 +176,5 @@ python tests/test_emotions.py
 - Lighting, camera quality, occlusions, glasses, and individual differences affect output.
 - Looking at the camera does not imply consent, interest, or intent.
 - Mudra detection and gesture description are currently mocks.
+- The webcam pipeline's final response generator is currently a mock; the Ollama-backed modules remain available separately.
+- Thresholds are experimental and have not been scientifically validated.
