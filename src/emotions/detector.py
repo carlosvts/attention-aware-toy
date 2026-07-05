@@ -26,15 +26,7 @@ def classify_expression(blendshapes: dict[str, float]) -> EmotionState:
     frown = _score(blendshapes, "mouthFrownLeft", "mouthFrownRight")
     eye_squint = _score(blendshapes, "eyeSquintLeft", "eyeSquintRight")
 
-    # For surprising
     brow_down = _score(blendshapes, "browDownLeft", "browDownRight")
-    brow_up = _score(
-        blendshapes,
-        "browInnerUp",
-        "browOuterUpRight",
-        "browOuterUpLeft",
-    )
-    brow_inner_up = _score(blendshapes, "browInnerUp")
     brow_outer_up = _score(blendshapes, "browOuterUpRight", "browOuterUpLeft")
     eye_wide = _score(blendshapes, "eyeWideLeft", "eyeWideRight")
     jaw_open = _score(blendshapes, "jawOpen")
@@ -43,8 +35,13 @@ def classify_expression(blendshapes: dict[str, float]) -> EmotionState:
         + 0.40 * eye_wide
         + 0.15 * jaw_open
     )
+    positive = max(
+        smile if smile >= 0.30 else 0.0,
+        surprised if surprised >= 0.22 else 0.0,
+    )
     shrug = _score(blendshapes, "mouthShrugUpper", "mouthShrugLower")
     mouth_shrug_lower = _score(blendshapes, "mouthShrugLower")
+    mouth_pucker = _score(blendshapes, "mouthPucker")
     mouth_press = _score(blendshapes, "mouthPressLeft", "mouthPressRight")
     nose_sneer = _score(
         blendshapes,
@@ -56,31 +53,69 @@ def classify_expression(blendshapes: dict[str, float]) -> EmotionState:
         "mouthUpperUpLeft",
         "mouthUpperUpRight",
     )
-    negative = max(
-        0.55 * mouth_press +
-        0.25 * frown +
-        0.20 * brow_down,
+    # A negative expression must have mutually supporting cues. The activation
+    # floor rejects isolated blendshapes, while the weighted averages retain
+    # information from every active cue instead of collapsing to the weakest.
+    activation_floor = 0.08
 
-        0.50 * mouth_press +
-        0.30 * nose_sneer +
-        0.20 * upper_lip,
+    mouth_tension = max(mouth_press, frown)
+    tension_support = 0.70 * brow_down + 0.30 * eye_squint
+    tension = 0.0
+    if (
+        mouth_tension >= activation_floor
+        and max(brow_down, eye_squint) >= activation_floor
+    ):
+        tension = 0.55 * mouth_tension + 0.45 * tension_support
 
-        0.60 * frown +
-        0.40 * mouth_shrug_lower,
+    negative_mouth_support = max(
+        upper_lip,
+        mouth_press,
+        frown,
+        mouth_shrug_lower,
     )
+    nasal_negative = 0.0
+    if (
+        nose_sneer >= activation_floor
+        and negative_mouth_support >= activation_floor
+    ):
+        nasal_negative = 0.60 * nose_sneer + 0.40 * negative_mouth_support
+
+    sadness_cues = (
+        (mouth_shrug_lower, 0.60),
+        (frown, 0.40),
+    )
+    sadness = 0.0
+    active_sadness_cues = [
+        (cue, weight)
+        for cue, weight in sadness_cues
+        if cue >= activation_floor
+    ]
+    if len(active_sadness_cues) >= 2:
+        active_weight = sum(weight for _, weight in active_sadness_cues)
+        sadness_base = sum(
+            cue * weight for cue, weight in active_sadness_cues
+        ) / active_weight
+        sadness = (
+            0.90 * sadness_base
+            + 0.10 * mouth_pucker
+        )
+
+    negative = max(tension, nasal_negative, sadness)
 
     candidates = {
-        "smiling_expression": smile,
-        "surprised_expression": surprised,
+        "positive_expression": positive,
         "negative_expression": negative,
     }
-    print(f"smile={smile:.3f} frown={frown:.3f} brow_down={brow_down:.3f} "
-      f"mouth_press={mouth_press:.3f} shrug={shrug:.3f} negative={negative:.3f}")
+    print(
+        f"smile={smile:.3f} surprised={surprised:.3f} positive={positive:.3f} "
+        f"frown={frown:.3f} brow_down={brow_down:.3f} "
+        f"mouth_press={mouth_press:.3f} shrug={shrug:.3f} "
+        f"nose_sneer={nose_sneer:.3f} negative={negative:.3f}"
+    )
 
     thresholds = {
-        "smiling_expression": 0.30,
-        "surprised_expression": 0.22,
-        "negative_expression": 0.18,
+        "positive_expression": 0.22,
+        "negative_expression": 0.16,
     }
 
     label, confidence = max(candidates.items(), key=lambda item: item[1])
