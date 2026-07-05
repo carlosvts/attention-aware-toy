@@ -16,7 +16,7 @@ class ResponsePromptTests(unittest.TestCase):
     ) -> None:
         client_factory.return_value.chat.return_value = "Olá!"
         emotion_state = EmotionState(
-            label="focused_expression",
+            label="negative_expression",
             confidence=0.72,
             blendshapes={"browDownLeft": 0.7},
         )
@@ -39,7 +39,7 @@ class ResponsePromptTests(unittest.TestCase):
         self.assertIn("Estado de atenção do usuário: ATTENDING", user_prompt)
         self.assertIn("Duração do olhar: 1.2s", user_prompt)
         self.assertIn("apparent_affect:", user_prompt)
-        self.assertIn("label: focused_expression", user_prompt)
+        self.assertIn("label: negative_expression", user_prompt)
         self.assertIn("confidence: 0.720", user_prompt)
         self.assertIn(
             "Uma pessoa está diante da câmera.", user_prompt
