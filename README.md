@@ -1,84 +1,144 @@
 # Attention-Aware Toy
 
-Toy project for an attention-triggered Human-Robot Interaction pipeline.
+Experimental Human-Robot Interaction prototype driven by webcam attention,
+apparent facial-expression cues, mocked interaction context, and a WIP Moktak
+audio feedback module.
 
-This is an experimental prototype, not a production system. It does not identify people and must not be used to infer a person's real emotion, intent, or mental state. Facial-expression output is only an apparent-expression heuristic from visible blendshapes.
+This is not a production system. It does not identify people and must not be
+used to infer a person's real emotion, intent, consent, or mental state.
+Facial-expression output is only an apparent-expression heuristic from visible
+MediaPipe blendshapes.
 
 ## Current Pipeline
 
-The main app runs camera capture, attention detection, and event processing in separate threads. Emotion detection is event-driven:
+The main app runs camera capture, attention detection, and event processing in
+separate threads. Expression detection and response generation are event-driven:
 
 ```text
-attention detected
-  -> screenshot/frame
+camera frame
+  -> continuous attention scoring
+  -> sustained attention gate
+  -> snapshot/frame
   -> apparent facial-expression detection
   -> mock mudra detection
   -> mock gesture description
   -> mock LLM response
-  -> terminal output
+  -> WIP Moktak decision
+  -> terminal/debug output
 ```
 
-The main app does not run emotion detection on every frame. It only calls `EmotionDetector.detect()` after sustained attention triggers an interaction event.
+The main app does not classify expression on every camera frame. It calls
+`EmotionDetector.detect()` only after sustained attention triggers an
+interaction event.
+
+## Moktak Module (WIP)
+
+`src/audio` contains the in-progress Moktak feedback path. The goal is to map
+interaction state into a parameterized Moktak sound without coupling the policy
+to OpenCV, MediaPipe, or the main app loop.
+
+Current pieces:
+
+- `MoktakParameters`: immutable playback intent model.
+- `decide_moktak()`: pure policy that maps apparent expression, optional mudra,
+  optional LLM response, and attention state to Moktak parameters.
+- `render_moktak()`: renders `src/audio/moktak.wav` into an in-memory audio
+  buffer using gain, intensity, duration, fades, and frequency scaling.
+- `MoktakPlayer`: optional `sounddevice` adapter for looping rendered audio.
+- `MoktakDisplay`: lightweight adapter used by the main app today; it logs the
+  Moktak decision instead of owning real playback.
+- `render_moktak_visualizer()`: OpenCV debug panel for the manual Moktak test.
+
+Current policy behavior:
+
+- `negative_expression` lowers the Moktak frequency.
+- `positive_expression` raises the Moktak frequency.
+- `neutral_expression` or missing expression keeps the base frequency.
+- `NO_FACE` disables Moktak output.
+- calm mudra markers can deepen the negative-expression frequency mapping, but
+  mudra detection is still mocked.
+
+WIP status:
+
+- The main app currently uses `MoktakDisplay`, so it prints Moktak parameters
+  rather than playing audio.
+- The manual Moktak test uses `MoktakPlayer` and can play real audio when
+  `sounddevice` and the host audio device are available.
+- Mudra and LLM signals are still mocks in the webcam pipeline.
+- The Moktak mapping is experimental and should be treated as a debug feedback
+  mechanism, not a validated affective response model.
 
 ## Structure
 
 ```text
 src/
-  app.py
-  __init__.py
+  app.py                  threaded webcam app
+  text_app.py             terminal-only Ollama text path
+  profiling.py            JSONL profiling helpers
   attention/
-    __init__.py
-    detector.py
-    tracker.py
+    detector.py           MediaPipe attention score
+    tracker.py            attention state and gaze duration
   emotions/
-    __init__.py
-    detector.py
-    types.py
-  llm/
-    __init__.py
-    lifecycle.py
-    mocks.py
-    ollama_client.py
-    response_generator.py
-    scene_describer.py
+    detector.py           FACS AU-inspired blendshape heuristic
+    types.py              EmotionState model
+  audio/
+    display.py            Moktak decision logger
+    models.py             MoktakParameters
+    player.py             optional real-audio adapter
+    policy.py             pure Moktak policy
+    renderer.py           WAV renderer/frequency shifter
+    visualizer.py         OpenCV audio debug panel
+    moktak.wav            source Moktak asset
   debug/
-    __init__.py
-    windows.py
-  profiling.py
-  text_app.py
+    windows.py            OpenCV overlays and debug windows
+  llm/
+    lifecycle.py          Ollama readiness/unload helpers
+    mocks.py              webcam-pipeline mocks
+    ollama_client.py      Ollama HTTP client
+    response_generator.py text response prompt path
+    scene_describer.py    vision prompt path
 ```
 
-There is no final `src/state` or `src/perception` module. Attention, emotion, debug windows, and LLM/VLM-related code are separated by responsibility.
+## Main Modules
 
-## Modules
+**attention**: MediaPipe face-landmark attention score, attention state
+classification, and sustained-gaze tracking.
 
-**attention**: MediaPipe face-landmark attention score, gaze duration, and sustained-attention gating.
+**emotions**: MediaPipe Face Landmarker blendshape detection. The classifier is
+a FACS Action Units (AUs)-inspired heuristic over visible blendshape cues and
+returns `positive_expression`, `negative_expression`, or `neutral_expression`.
 
-**emotions**: MediaPipe Face Landmarker blendshape heuristics. `EmotionDetector` loads `models/face_landmarker.task` with `output_face_blendshapes=True`, receives OpenCV BGR frames, converts to RGB, and returns `EmotionState | None`.
+**audio**: WIP Moktak policy, parameter model, WAV renderer, optional real
+player, terminal display adapter, and OpenCV visualizer.
 
-**llm**: Ollama VLM/LLM clients plus local mocks used by the current webcam pipeline for mudra detection, gesture description, and response generation.
+**llm**: Ollama client and lifecycle helpers. The current webcam app uses mocks
+for mudra detection, gesture description, and final response generation; the
+Ollama-backed paths remain available separately.
 
-**debug**: OpenCV drawing and `cv2.imshow` helpers. Detector logic does not own window rendering.
+**debug**: OpenCV overlay and window helpers. Detectors do not own rendering.
 
 ## Apparent Expression Heuristic
 
-`src/emotions/detector.py` maps blendshapes conservatively. Paired
-blendshapes are averaged before the candidate scores are calculated:
+`src/emotions/detector.py` approximates FACS Action Units using MediaPipe Face
+Landmarker blendshapes:
 
-- `positive_expression`: strongest valid smile or surprise pattern;
-- `negative_expression`: strongest coherent tension, nasal-negative, or sadness/displeasure pattern, threshold `0.16`;
-- `neutral_expression`: returned when the strongest candidate does not reach its threshold.
+- positive cues: smile, cheek/eye activation, and surprise-like upper-face cues;
+- negative cues: supported sadness, anger/tension, disgust/aversion, and
+  anxiety/tension patterns;
+- neutral fallback: returned when no candidate passes its threshold.
 
-Terminal and overlay text use cautious labels such as `apparent_expression=positive_expression` and `apparent_expression=neutral_expression`. These labels describe visible facial cues, not a person's internal emotional state.
+Negative expression detection requires supporting upper- and lower-face cues to
+reduce false positives from isolated blendshape activation. The labels describe
+visible facial cues only, not internal emotional state.
 
 ## Requirements
 
 - Python 3.11+
-- a webcam accessible through OpenCV
-- the MediaPipe model files included in `models/`
-- Ollama only when running the optional text-only LLM entry point
-
-## Running
+- webcam accessible through OpenCV
+- MediaPipe model files in `models/`
+- `src/audio/moktak.wav`
+- audio output device only for the manual Moktak audio test
+- Ollama only for the optional `src.text_app` path
 
 Install dependencies:
 
@@ -88,15 +148,18 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Run the attention-triggered app:
+## Running
+
+Run the main attention-triggered webcam app:
 
 ```bash
 python -m src.app
 ```
 
-The webcam app currently uses local mocks after expression detection, so it does not require Ollama.
+The main app opens the camera and emotion snapshot windows. It uses mocked
+mudra/LLM components and logs the current Moktak decision to the terminal.
 
-Run the optional text-only Ollama path:
+Run the optional terminal-only Ollama path:
 
 ```bash
 ollama pull qwen2.5:1.5b
@@ -104,7 +167,11 @@ ollama serve
 python -m src.text_app
 ```
 
-Run the isolated emotion webcam debug script:
+Press `q` or `Esc` to quit OpenCV windows.
+
+## Manual Checks
+
+Run the isolated emotion webcam check:
 
 ```bash
 python tests/test_emotions.py
@@ -112,7 +179,29 @@ python tests/test_emotions.py
 python -m tests.test_emotions
 ```
 
-Press `q` or `Esc` to quit OpenCV windows.
+This opens `Emotion Test` and `Emotion Debug`, then prints the current
+apparent-expression label and confidence.
+
+Run the WIP Moktak webcam/audio check:
+
+```bash
+python -m tests.test_moktak
+```
+
+This opens `Moktak Camera Test` and `Moktak Audio Visualizer`, runs attention
+and expression detection continuously, and uses `MoktakPlayer` for real audio
+when available. If audio playback fails, the visualizer still shows the rendered
+decision state.
+
+Run the end-to-end main app check:
+
+```bash
+python -m src.app
+```
+
+This verifies the threaded webcam pipeline, sustained-attention trigger,
+event-driven expression snapshot, mocked mudra/LLM path, and WIP Moktak decision
+logging.
 
 ## Configuration
 
@@ -121,20 +210,22 @@ Webcam and interaction settings are constants near the top of `src/app.py`:
 | Setting | Default | Purpose |
 | --- | ---: | --- |
 | `CAMERA_INDEX` | `0` | OpenCV camera device |
-| `ATTENTION_THRESHOLD` | `0.7` | Minimum attention score |
+| `ATTENTION_THRESHOLD` | `0.7` | Threshold reference kept near app settings; state cutoffs live in `AttentionState.classify()` |
 | `ATTENTION_DURATION_SECONDS` | `1.0` | Required sustained-attention time |
-| `COOLDOWN_SECONDS` | `5.0` | Minimum delay between events |
+| `COOLDOWN_SECONDS` | `5.0` | Minimum delay between interaction events |
+| `SHOW_CAMERA_WINDOW` | `True` | Toggle the live camera window |
+| `SHOW_EMOTION_SNAPSHOT_WINDOW` | `True` | Toggle the latest event snapshot window |
 
-The Ollama-backed modules accept these environment variables:
+Ollama-backed modules accept these environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API address |
 | `OLLAMA_MODEL` | `qwen2.5:1.5b` | Text model |
-| `OLLAMA_VISION_MODEL` | `qwen3-vl:2b` | Vision model |
+| `OLLAMA_VISION_MODEL` | `openbmb/minicpm-v4.6` | Vision model |
 | `OLLAMA_TIMEOUT_SECONDS` | `30` | Text request timeout |
 | `OLLAMA_VISION_TIMEOUT_SECONDS` | `60` | Vision request timeout |
-| `ATTENTION_LOG_DIR` | `logs/` | Telemetry output directory |
+| `ATTENTION_LOG_DIR` | `logs/` | Profiling JSONL output directory |
 
 ## Windows
 
@@ -143,54 +234,33 @@ Main app:
 | Window | Purpose |
 | --- | --- |
 | `Camera` | Live camera frame with attention overlay |
-| `Emotion Snapshot` | Captured frame used for event-driven emotion detection |
+| `Emotion Snapshot` | Latest frame that triggered event-driven expression detection |
 
-Emotion test:
+Emotion check:
 
 | Window | Purpose |
 | --- | --- |
 | `Emotion Test` | Live webcam frame with apparent-expression overlay |
 | `Emotion Debug` | Apparent-expression metrics and top blendshape scores |
 
-## Tests
+Moktak check:
 
-Run the manual webcam emotion test:
-
-```bash
-python tests/test_emotions.py
-# or
-python -m tests.test_emotions
-```
-
-This opens the `Emotion Test` and `Emotion Debug` windows and prints the
-current apparent-expression label and confidence.
-
-Run the manual webcam Moktak integration test:
-
-```bash
-python -m tests.test_moktak
-```
-
-This combines attention, apparent-expression detection, Moktak audio playback,
-and the audio visualizer windows without mocked mudra or LLM steps.
-
-Run the main webcam app:
-
-```bash
-python -m src.app
-```
-
-This is the end-to-end manual app test. It opens the camera window, tracks
-sustained attention, triggers event-driven apparent-expression detection, shows
-the latest emotion snapshot, and updates the Moktak display. Press `q` or `Esc`
-to close OpenCV windows.
+| Window | Purpose |
+| --- | --- |
+| `Moktak Camera Test` | Live webcam frame with attention and expression overlays |
+| `Moktak Audio Visualizer` | Current Moktak parameters, waveform, and output level |
 
 ## Limitations
 
 - The attention score is a heuristic, not an objective measure of attention.
 - The emotion module detects apparent facial expression, not real emotion.
-- Lighting, camera quality, occlusions, glasses, and individual differences affect output.
+- Moktak feedback is WIP and not validated as an affective audio model.
+- Lighting, camera quality, occlusions, glasses, and individual differences
+  affect webcam output.
 - Looking at the camera does not imply consent, interest, or intent.
-- Mudra detection and gesture description are currently mocks.
-- The webcam pipeline's final response generator is currently a mock; the Ollama-backed modules remain available separately.
-- Thresholds are experimental and have not been scientifically validated.
+- Mudra detection, gesture description, and main-app response generation are
+  currently mocks.
+- The main app logs Moktak parameters; real audio playback is currently isolated
+  to the manual Moktak check.
+- Thresholds and mappings are experimental and have not been scientifically
+  validated.
