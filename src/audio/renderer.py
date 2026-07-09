@@ -39,8 +39,10 @@ def _fit_duration(samples: AudioBuffer, frame_count: int) -> AudioBuffer:
         return samples.copy()
 
     if len(samples) > frame_count:
+        # Cutting keeps the original sample spacing, so playback speed stays fixed.
         return samples[:frame_count].copy()
 
+    # Repeating keeps every hit at its original speed instead of stretching it.
     repeats = int(np.ceil(frame_count / len(samples)))
     return np.tile(samples, (repeats, 1))[:frame_count].astype(np.float32)
 
@@ -74,6 +76,7 @@ def _phase_vocoder(
         right = min(left + 1, spectrum.shape[1] - 1)
         fraction = step - left
 
+        # Interpolate magnitudes, then advance phase coherently to avoid warble.
         magnitude = (
             (1.0 - fraction) * np.abs(spectrum[:, left])
             + fraction * np.abs(spectrum[:, right])
@@ -96,6 +99,7 @@ def _time_stretch_channel(
     if np.isclose(rate, 1.0) or len(channel) < 32:
         return channel.copy()
 
+    # STFT size follows the source length so short test tones remain valid.
     fft_size = min(2048, 2 ** int(np.floor(np.log2(len(channel)))))
     fft_size = max(32, fft_size)
     hop_length = max(1, fft_size // 4)
@@ -134,6 +138,7 @@ def _shift_frequency(samples: AudioBuffer, frequency_scale: float) -> AudioBuffe
     if np.isclose(frequency_scale, 1.0):
         return samples.copy()
 
+    # Pitch shift = stretch without pitch change, then resample back to length.
     stretch_rate = 1.0 / frequency_scale
     shifted_channels = []
     for channel in range(samples.shape[1]):
@@ -154,6 +159,7 @@ def render_moktak(
         return np.zeros((0, source.shape[1]), dtype=np.float32), sample_rate
 
     frame_count = max(1, int(parameters.duration_seconds * sample_rate))
+    # Frequency is changed first; duration fitting later never rescales time.
     rendered = _shift_frequency(source, parameters.frequency_scale)
     rendered = _fit_duration(rendered, frame_count)
     rendered = _shape_intensity(rendered, parameters.intensity)

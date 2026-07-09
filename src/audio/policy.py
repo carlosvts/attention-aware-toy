@@ -58,7 +58,8 @@ def _enabled_parameters(
     frequency_scale: float,
     attention_state: NamedState | None,
 ) -> MoktakParameters:
-    """Return moktakparemeters editing just frequency scale and attention state"""
+    """Return moktak parameters editing just frequency scale and attention state."""
+    # Keep rhythm/body stable across emotions; emotion only changes frequency.
     return MoktakParameters(
         enabled=True,
         bpm=_BASE_BPM,
@@ -87,16 +88,19 @@ def decide_moktak(
 
     if emotion_label == "negative_expression":
         if _is_calm_mudra(mudra_state):
+            # A calm mudra makes the negative-expression cue deeper, not slower.
             return _enabled_parameters(
                 _CALM_NEGATIVE_FREQUENCY_SCALE,
                 attention_state,
             )
+        # Negative apparent expression lowers the moktak frequency.
         return _enabled_parameters(
             _NEGATIVE_FREQUENCY_SCALE,
             attention_state,
         )
 
     if emotion_label == "positive_expression":
+        # Positive apparent expression raises the moktak frequency.
         return _enabled_parameters(
             _POSITIVE_FREQUENCY_SCALE,
             attention_state,
