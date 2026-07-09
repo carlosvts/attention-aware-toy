@@ -1,11 +1,11 @@
 """Render a moktak WAV into a parameterized, in-memory beat pattern."""
 
 from pathlib import Path
-import wave
 
+import librosa
 import numpy as np
 from numpy.typing import NDArray
-from scipy import signal
+from scipy.io import wavfile
 
 from .display import DEFAULT_MOKTAK_PATH
 from .models import MoktakParameters
@@ -15,16 +15,33 @@ AudioBuffer = NDArray[np.float32]
 
 
 def load_wav(path: Path = DEFAULT_MOKTAK_PATH) -> tuple[AudioBuffer, int]:
-    """Load the bundled 16-bit PCM WAV as normalized floating-point samples."""
-    with wave.open(str(path), "rb") as wav_file:
-        if wav_file.getsampwidth() != 2:
-            raise ValueError("moktak renderer supports 16-bit PCM WAV files only")
-        channels = wav_file.getnchannels()
-        sample_rate = wav_file.getframerate()
-        frames = wav_file.readframes(wav_file.getnframes())
-    # normalize it
-    samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
-    return samples.reshape(-1, channels), sample_rate
+    """Load a clean WAV as normalized floating-point samples."""
+    sample_rate, samples = wavfile.read(path)
+    if sample_rate <= 0:
+        raise ValueError("moktak WAV must declare a positive sample rate")
+    if samples.ndim not in (1, 2):
+        raise ValueError("moktak renderer supports mono or stereo WAV files only")
+    if samples.size == 0:
+        raise ValueError("moktak WAV must contain at least one frame")
+
+    # scipy.io.wavfile gives decoded PCM/float arrays without manual byte parsing.
+    if np.issubdtype(samples.dtype, np.integer):
+        dtype_info = np.iinfo(samples.dtype)
+        scale = float(max(abs(dtype_info.min), dtype_info.max))
+        normalized = samples.astype(np.float32) / scale
+    elif np.issubdtype(samples.dtype, np.floating):
+        normalized = samples.astype(np.float32)
+        if np.any((normalized < -1.0) | (normalized > 1.0)):
+            raise ValueError("floating-point moktak WAV must be normalized")
+    else:
+        raise ValueError(f"unsupported moktak WAV dtype: {samples.dtype}")
+
+    if not np.all(np.isfinite(normalized)):
+        raise ValueError("moktak WAV contains non-finite samples")
+    if normalized.ndim == 1:
+        normalized = normalized[:, None]
+
+    return normalized.astype(np.float32), int(sample_rate)
 
 
 def _shape_intensity(samples: AudioBuffer, intensity: float) -> AudioBuffer:
@@ -47,106 +64,31 @@ def _fit_duration(samples: AudioBuffer, frame_count: int) -> AudioBuffer:
     return np.tile(samples, (repeats, 1))[:frame_count].astype(np.float32)
 
 
-def _phase_vocoder(
-    spectrum: NDArray[np.complex64] | NDArray[np.complex128],
-    rate: float,
-    hop_length: int,
-    fft_size: int,
-) -> NDArray[np.complex64]:
-    """Time-stretch an STFT matrix while preserving pitch."""
-    if spectrum.shape[1] < 2:
-        return spectrum.astype(np.complex64)
-
-    time_steps = np.arange(0, spectrum.shape[1] - 1, rate, dtype=np.float64)
-    stretched = np.zeros(
-        (spectrum.shape[0], len(time_steps)),
-        dtype=np.complex64,
-    )
-    phase_advance = (
-        2.0
-        * np.pi
-        * hop_length
-        * np.arange(spectrum.shape[0], dtype=np.float64)
-        / fft_size
-    )
-    phase = np.angle(spectrum[:, 0]).astype(np.float64)
-
-    for index, step in enumerate(time_steps):
-        left = int(np.floor(step))
-        right = min(left + 1, spectrum.shape[1] - 1)
-        fraction = step - left
-
-        # Interpolate magnitudes, then advance phase coherently to avoid warble.
-        magnitude = (
-            (1.0 - fraction) * np.abs(spectrum[:, left])
-            + fraction * np.abs(spectrum[:, right])
-        )
-        stretched[:, index] = magnitude * np.exp(1j * phase)
-
-        delta = np.angle(spectrum[:, right]) - np.angle(spectrum[:, left])
-        delta -= phase_advance
-        delta -= 2.0 * np.pi * np.round(delta / (2.0 * np.pi))
-        phase += phase_advance + delta
-
-    return stretched
-
-
-def _time_stretch_channel(
-    channel: NDArray[np.float32],
-    rate: float,
-) -> NDArray[np.float32]:
-    """Stretch duration without changing pitch using a small phase vocoder."""
-    if np.isclose(rate, 1.0) or len(channel) < 32:
-        return channel.copy()
-
-    # STFT size follows the source length so short test tones remain valid.
-    fft_size = min(2048, 2 ** int(np.floor(np.log2(len(channel)))))
-    fft_size = max(32, fft_size)
-    hop_length = max(1, fft_size // 4)
-
-    _, _, spectrum = signal.stft(
-        channel,
-        window="hann",
-        nperseg=fft_size,
-        noverlap=fft_size - hop_length,
-        boundary="zeros",
-        padded=True,
-    )
-    stretched_spectrum = _phase_vocoder(
-        spectrum,
-        rate,
-        hop_length,
-        fft_size,
-    )
-    _, stretched = signal.istft(
-        stretched_spectrum,
-        window="hann",
-        nperseg=fft_size,
-        noverlap=fft_size - hop_length,
-        input_onesided=True,
-        boundary=True,
-    )
-
-    target_length = max(1, int(round(len(channel) / rate)))
-    if len(stretched) < target_length:
-        stretched = np.pad(stretched, (0, target_length - len(stretched)))
-    return stretched[:target_length].astype(np.float32)
-
-
-def _shift_frequency(samples: AudioBuffer, frequency_scale: float) -> AudioBuffer:
+def _shift_frequency(
+    samples: AudioBuffer,
+    sample_rate: int,
+    frequency_scale: float,
+) -> AudioBuffer:
     """Raise or lower the perceived frequency while preserving duration."""
     if np.isclose(frequency_scale, 1.0):
         return samples.copy()
 
-    # Pitch shift = stretch without pitch change, then resample back to length.
-    stretch_rate = 1.0 / frequency_scale
-    shifted_channels = []
-    for channel in range(samples.shape[1]):
-        stretched = _time_stretch_channel(samples[:, channel], stretch_rate)
-        shifted = signal.resample(stretched, len(samples)).astype(np.float32)
-        shifted_channels.append(shifted)
+    # Librosa works in semitone steps: scale 2.0 = +12, scale 0.5 = -12.
+    semitones = float(12.0 * np.log2(frequency_scale))
+    shifted_channels = [
+        librosa.effects.pitch_shift(
+            y=samples[:, channel],
+            sr=sample_rate,
+            n_steps=semitones,
+        ).astype(np.float32)
+        for channel in range(samples.shape[1])
+    ]
 
-    return np.column_stack(shifted_channels).astype(np.float32)
+    # The algorithm is duration-preserving, but this keeps frame count exact.
+    return _fit_duration(
+        np.column_stack(shifted_channels).astype(np.float32),
+        len(samples),
+    )
 
 
 def render_moktak(
@@ -160,7 +102,7 @@ def render_moktak(
 
     frame_count = max(1, int(parameters.duration_seconds * sample_rate))
     # Frequency is changed first; duration fitting later never rescales time.
-    rendered = _shift_frequency(source, parameters.frequency_scale)
+    rendered = _shift_frequency(source, sample_rate, parameters.frequency_scale)
     rendered = _fit_duration(rendered, frame_count)
     rendered = _shape_intensity(rendered, parameters.intensity)
     rendered *= parameters.gain

@@ -15,6 +15,7 @@ from src.attention import (
     AttentionState,
     GazeDurationTracker,
 )
+from src.audio import MoktakDisplay, decide_moktak
 from src.debug import draw_attention_overlay, draw_emotion_overlay, show_or_close
 from src.emotions import EmotionDetector, EmotionState
 from src.llm.mocks import GestureDescriptionMock, LLMResponseMock, MudraDetectorMock
@@ -163,10 +164,12 @@ def _event_worker(
     stop_event: Event,
     emotion_events: Queue[FramePacket],
     latest_snapshot: LatestValue,
+    latest_attention: LatestValue,
 ) -> None:
     mudra_detector = MudraDetectorMock()
     gesture_description = GestureDescriptionMock()
     llm_response = LLMResponseMock()
+    moktak_display = MoktakDisplay()
     number_responses = 0
     try:
         with EmotionDetector() as emotion_detector:
@@ -180,6 +183,14 @@ def _event_worker(
                 mudra = mudra_detector.detect(packet.frame)
                 description = gesture_description.describe(mudra, emotion)
                 response = llm_response.generate(description)
+                attention = latest_attention.get()
+                moktak_parameters = decide_moktak(
+                    emotion_state=emotion,
+                    mudra_state=mudra,
+                    llm_response=response,
+                    attention_state=attention.state if attention else None,
+                )
+                moktak_display.show(moktak_parameters)
                 expression = emotion.label if emotion else "unknown"
                 confidence = emotion.confidence if emotion else 0.0
                 
@@ -237,7 +248,7 @@ def run() -> None:
         ),
         Thread(
             target=_event_worker,
-            args=(stop_event, emotion_events, latest_snapshot),
+            args=(stop_event, emotion_events, latest_snapshot, latest_attention),
             name="event-worker",
             daemon=True,
         ),
