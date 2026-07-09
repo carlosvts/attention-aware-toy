@@ -154,19 +154,36 @@ Emotion test:
 
 ## Tests
 
-Unit tests:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-The automated suite covers attention classification and gating, expression heuristics, overlays, Ollama preflight and client behavior, prompts, scene description, and profiling.
-
-Manual webcam emotion test:
+Run the manual webcam emotion test:
 
 ```bash
 python tests/test_emotions.py
+# or
+python -m tests.test_emotions
 ```
+
+This opens the `Emotion Test` and `Emotion Debug` windows and prints the
+current apparent-expression label and confidence.
+
+Run the manual webcam Moktak integration test:
+
+```bash
+python -m tests.test_moktak
+```
+
+This combines attention, apparent-expression detection, Moktak audio playback,
+and the audio visualizer windows without mocked mudra or LLM steps.
+
+Run the main webcam app:
+
+```bash
+python -m src.app
+```
+
+This is the end-to-end manual app test. It opens the camera window, tracks
+sustained attention, triggers event-driven apparent-expression detection, shows
+the latest emotion snapshot, and updates the Moktak display. Press `q` or `Esc`
+to close OpenCV windows.
 
 ## Limitations
 
