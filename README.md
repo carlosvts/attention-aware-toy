@@ -68,6 +68,9 @@ WIP status:
 - The Moktak mapping is experimental and should be treated as a debug feedback
   mechanism, not a validated affective response model.
 
+> [!IMPORTANT]
+> To run/debug/demonstrate the moktak logic, use `python -m tests.test_moktak`
+
 ## Structure
 
 ```text
