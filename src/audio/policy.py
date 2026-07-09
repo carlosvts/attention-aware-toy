@@ -17,6 +17,7 @@ class NamedState(Protocol):
     name: str
 
 
+# TODO: mocked names, change later
 _CALM_MUDRA_MARKERS = (
     "calm",
     "calma",
