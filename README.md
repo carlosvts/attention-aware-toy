@@ -208,18 +208,33 @@ logging.
 
 ## Configuration
 
-Webcam and interaction settings are constants near the top of `src/app.py`:
+Copy `.env-example` to `.env` and adjust values for your local machine:
 
-| Setting | Default | Purpose |
+```bash
+cp .env-example .env
+```
+
+Install dependencies with:
+
+```bash
+pip install -r requirements.txt
+```
+
+Webcam and interaction settings are loaded from `.env`:
+
+| Variable | Default | Purpose |
 | --- | ---: | --- |
 | `CAMERA_INDEX` | `0` | OpenCV camera device |
 | `ATTENTION_THRESHOLD` | `0.7` | Threshold reference kept near app settings; state cutoffs live in `AttentionState.classify()` |
 | `ATTENTION_DURATION_SECONDS` | `1.0` | Required sustained-attention time |
 | `COOLDOWN_SECONDS` | `5.0` | Minimum delay between interaction events |
-| `SHOW_CAMERA_WINDOW` | `True` | Toggle the live camera window |
-| `SHOW_EMOTION_SNAPSHOT_WINDOW` | `True` | Toggle the latest event snapshot window |
+| `MIN_DUCKING_SECONDS` | `1.2` | Fallback ducking duration when TTS is unavailable |
+| `SPEECH_WORDS_PER_SECOND` | `2.6` | Fallback speech duration estimate |
+| `SHOW_ATTENTION_WINDOW` | `True` | Toggle the continuous attention camera window |
+| `SHOW_EMOTION_SNAPSHOT_WINDOW` | `True` | Toggle the event emotion snapshot window |
+| `SHOW_MUDRA_SNAPSHOT_WINDOW` | `True` | Toggle the event mudra snapshot window |
 
-Ollama-backed modules accept these environment variables:
+Ollama-backed modules accept these variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -230,14 +245,30 @@ Ollama-backed modules accept these environment variables:
 | `OLLAMA_VISION_TIMEOUT_SECONDS` | `60` | Vision request timeout |
 | `ATTENTION_LOG_DIR` | `logs/` | Profiling JSONL output directory |
 
+TTS accepts these variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TTS_PROVIDER` | `generic` | `generic` prints speech only; `openai` enables API TTS |
+| `OPENAI_API_KEY` | empty | Required only when `TTS_PROVIDER=openai` |
+| `OPENAI_TTS_MODEL` | `tts-1` | Optional OpenAI text-to-speech model |
+| `OPENAI_TTS_VOICE` | `alloy` | Optional OpenAI built-in TTS voice |
+| `OPENAI_TTS_INSTRUCTIONS` | calm guide prompt | Optional OpenAI voice style instructions |
+
+The default `generic` provider does not call any external TTS API. It keeps the
+LLM response in the terminal and uses estimated speech duration for moktak
+ducking. To re-enable OpenAI TTS later, install the OpenAI SDK and set
+`TTS_PROVIDER=openai` with a valid `OPENAI_API_KEY`.
+
 ## Windows
 
 Main app:
 
 | Window | Purpose |
 | --- | --- |
-| `Camera` | Live camera frame with attention overlay |
-| `Emotion Snapshot` | Latest frame that triggered event-driven expression detection |
+| `Attention` | Continuous frame processed by the attention detector with attention overlay |
+| `Emotion Snapshot` | Event frame with apparent-expression overlay |
+| `Mudra Snapshot` | Event frame with mudra overlay |
 
 Emotion check:
 
