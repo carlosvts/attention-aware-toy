@@ -35,7 +35,6 @@ def render_moktak_visualizer(
         f"gain: {parameters.gain:.2f}",
         f"intensity: {parameters.intensity:.2f}",
         f"regularity: {parameters.regularity:.2f}",
-        f"frequency: {parameters.frequency_scale:.2f}x",
         f"duration: {parameters.duration_seconds:.2f}s",
     )
     for index, line in enumerate(lines):

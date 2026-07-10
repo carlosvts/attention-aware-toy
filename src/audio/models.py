@@ -16,7 +16,7 @@ class MoktakParameters:
     ducking_gain: float
     fade_in_seconds: float
     fade_out_seconds: float
-    # defines frequency scale for the moktak to be played
+    # Kept for compatibility; the renderer preserves the moktak's natural pitch.
     frequency_scale: float = 1.0
 
     def __post_init__(self) -> None:

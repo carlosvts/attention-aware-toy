@@ -28,11 +28,12 @@ def _write_wav(path: Path, samples: np.ndarray, sample_rate: int) -> None:
 def _parameters(
     *,
     duration_seconds: float,
+    bpm: float = 60.0,
     frequency_scale: float = 1.0,
 ) -> MoktakParameters:
     return MoktakParameters(
         enabled=True,
-        bpm=60.0,
+        bpm=bpm,
         gain=1.0,
         intensity=3.0 / 7.0,
         regularity=1.0,
@@ -51,7 +52,7 @@ def _dominant_frequency(samples: np.ndarray, sample_rate: int) -> float:
     return float(frequencies[int(np.argmax(spectrum[1:]) + 1)])
 
 
-def test_policy_changes_frequency_instead_of_timing() -> None:
+def test_policy_changes_timing_instead_of_frequency() -> None:
     negative = decide_moktak(SimpleNamespace(label="negative_expression"))
     neutral = decide_moktak(SimpleNamespace(label="neutral_expression"))
     positive = decide_moktak(SimpleNamespace(label="positive_expression"))
@@ -61,12 +62,12 @@ def test_policy_changes_frequency_instead_of_timing() -> None:
         == neutral.duration_seconds
         == positive.duration_seconds
     )
-    assert negative.bpm == neutral.bpm == positive.bpm
+    assert negative.bpm < neutral.bpm < positive.bpm
     assert negative.intensity == neutral.intensity == positive.intensity
-    assert negative.frequency_scale < neutral.frequency_scale < positive.frequency_scale
+    assert negative.frequency_scale == neutral.frequency_scale == positive.frequency_scale
 
 
-def test_renderer_fits_duration_without_resampling_source_speed(tmp_path: Path) -> None:
+def test_renderer_spaces_hits_by_bpm_without_resampling_source(tmp_path: Path) -> None:
     sample_rate = 1000
     source = np.zeros(sample_rate, dtype=np.float32)
     source[100] = 1.0
@@ -82,10 +83,17 @@ def test_renderer_fits_duration_without_resampling_source_speed(tmp_path: Path) 
     assert rendered_rate == sample_rate
     assert len(rendered) == 2 * sample_rate
     hits = np.flatnonzero(rendered[:, 0] > 0.95)
-    assert hits.tolist() == [100, 500, 1100, 1500]
+    assert hits.tolist() == [9, 1009]
+
+    faster, _ = render_moktak(
+        _parameters(duration_seconds=2.0, bpm=120.0),
+        wav_path,
+    )
+    faster_hits = np.flatnonzero(faster[:, 0] > 0.95)
+    assert faster_hits.tolist() == [9, 509, 1009, 1509]
 
 
-def test_renderer_changes_frequency_without_changing_duration(tmp_path: Path) -> None:
+def test_renderer_preserves_source_frequency(tmp_path: Path) -> None:
     sample_rate = 8000
     duration_seconds = 1.0
     time = np.arange(int(sample_rate * duration_seconds)) / sample_rate
@@ -109,5 +117,5 @@ def test_renderer_changes_frequency_without_changing_duration(tmp_path: Path) ->
 
     assert len(lower) == len(base) == len(higher) == sample_rate
     base_frequency = _dominant_frequency(base, sample_rate)
-    assert _dominant_frequency(lower, sample_rate) < base_frequency * 0.90
-    assert _dominant_frequency(higher, sample_rate) > base_frequency * 1.10
+    assert np.isclose(_dominant_frequency(lower, sample_rate), base_frequency)
+    assert np.isclose(_dominant_frequency(higher, sample_rate), base_frequency)

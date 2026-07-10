@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import librosa
 import numpy as np
 from numpy.typing import NDArray
 from scipy.io import wavfile
@@ -12,6 +11,13 @@ from .models import MoktakParameters
 
 
 AudioBuffer = NDArray[np.float32]
+_ENVELOPE_WINDOW_SECONDS = 0.010
+_ONSET_THRESHOLD_RATIO = 0.25
+_MIN_ONSET_GAP_SECONDS = 0.18
+_HIT_PRE_ROLL_SECONDS = 0.005
+_HIT_TAIL_SECONDS = 0.18
+_HIT_MAX_BEAT_FRACTION = 0.90
+_HIT_FADE_OUT_SECONDS = 0.040
 
 
 def load_wav(path: Path = DEFAULT_MOKTAK_PATH) -> tuple[AudioBuffer, int]:
@@ -50,45 +56,104 @@ def _shape_intensity(samples: AudioBuffer, intensity: float) -> AudioBuffer:
     return np.sign(samples) * np.power(np.abs(samples), exponent)
 
 
-def _fit_duration(samples: AudioBuffer, frame_count: int) -> AudioBuffer:
-    """Fit playback length without changing the source playback speed."""
-    if len(samples) == frame_count:
-        return samples.copy()
-
-    if len(samples) > frame_count:
-        # Cutting keeps the original sample spacing, so playback speed stays fixed.
-        return samples[:frame_count].copy()
-
-    # Repeating keeps every hit at its original speed instead of stretching it.
-    repeats = int(np.ceil(frame_count / len(samples)))
-    return np.tile(samples, (repeats, 1))[:frame_count].astype(np.float32)
+def _rms_envelope(samples: AudioBuffer, sample_rate: int) -> NDArray[np.float32]:
+    mono = np.max(np.abs(samples), axis=1).astype(np.float32)
+    window = max(1, int(round(_ENVELOPE_WINDOW_SECONDS * sample_rate)))
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+    return np.sqrt(np.convolve(mono * mono, kernel, mode="same")).astype(np.float32)
 
 
-def _shift_frequency(
-    samples: AudioBuffer,
+def _active_regions(
+    envelope: NDArray[np.float32],
     sample_rate: int,
-    frequency_scale: float,
+) -> list[tuple[int, int]]:
+    peak = float(np.max(envelope)) if len(envelope) else 0.0
+    if peak <= 0.0:
+        return []
+
+    active = envelope > peak * _ONSET_THRESHOLD_RATIO
+    edges = np.diff(active.astype(np.int8))
+    starts = list(np.flatnonzero(edges == 1) + 1)
+    ends = list(np.flatnonzero(edges == -1) + 1)
+    if active[0]:
+        starts.insert(0, 0)
+    if active[-1]:
+        ends.append(len(active))
+
+    min_gap = max(1, int(round(_MIN_ONSET_GAP_SECONDS * sample_rate)))
+    regions: list[tuple[int, int]] = []
+    for start, end in zip(starts, ends):
+        if not regions or start - regions[-1][1] > min_gap:
+            regions.append((int(start), int(end)))
+        else:
+            regions[-1] = (regions[-1][0], int(end))
+    return regions
+
+
+def _prepare_hit(
+    source: AudioBuffer,
+    sample_rate: int,
+    beat_interval_frames: int,
 ) -> AudioBuffer:
-    """Raise or lower the perceived frequency while preserving duration."""
-    if np.isclose(frequency_scale, 1.0):
-        return samples.copy()
+    """Extract one natural-speed hit from a source that may contain several hits."""
+    regions = _active_regions(_rms_envelope(source, sample_rate), sample_rate)
+    if not regions:
+        hit = source.copy()
+    else:
+        first_start, first_end = regions[0]
+        pre_roll = int(round(_HIT_PRE_ROLL_SECONDS * sample_rate))
+        tail = int(round(_HIT_TAIL_SECONDS * sample_rate))
+        start = max(0, first_start - pre_roll)
+        natural_end = min(len(source), first_end + tail)
+        if len(regions) > 1:
+            natural_end = min(natural_end, regions[1][0])
+        hit = source[start:max(start + 1, natural_end)].copy()
 
-    # Librosa works in semitone steps: scale 2.0 = +12, scale 0.5 = -12.
-    semitones = float(12.0 * np.log2(frequency_scale))
-    shifted_channels = [
-        librosa.effects.pitch_shift(
-            y=samples[:, channel],
-            sr=sample_rate,
-            n_steps=semitones,
-        ).astype(np.float32)
-        for channel in range(samples.shape[1])
-    ]
+    max_hit_frames = max(1, int(round(beat_interval_frames * _HIT_MAX_BEAT_FRACTION)))
+    if len(hit) > max_hit_frames:
+        hit = hit[:max_hit_frames].copy()
 
-    # The algorithm is duration-preserving, but this keeps frame count exact.
-    return _fit_duration(
-        np.column_stack(shifted_channels).astype(np.float32),
-        len(samples),
+    fade_frames = min(len(hit), int(round(_HIT_FADE_OUT_SECONDS * sample_rate)))
+    if fade_frames > 1:
+        hit[-fade_frames:] *= np.linspace(1.0, 0.0, fade_frames, dtype=np.float32)[
+            :, None
+        ]
+    return hit.astype(np.float32)
+
+
+def _render_beat_pattern(
+    source: AudioBuffer,
+    sample_rate: int,
+    parameters: MoktakParameters,
+    frame_count: int,
+) -> AudioBuffer:
+    """Place natural-speed moktak hits according to bpm."""
+    rendered = np.zeros((frame_count, source.shape[1]), dtype=np.float32)
+    beat_interval = max(1, int(round((60.0 / parameters.bpm) * sample_rate)))
+    shaped_hit = _shape_intensity(
+        _prepare_hit(source, sample_rate, beat_interval),
+        parameters.intensity,
     )
+
+    for start in range(0, frame_count, beat_interval):
+        end = min(frame_count, start + len(shaped_hit))
+        hit_frames = end - start
+        if hit_frames <= 0:
+            break
+        rendered[start:end] += shaped_hit[:hit_frames]
+
+    return rendered
+
+
+def _beat_interval_frames(parameters: MoktakParameters, sample_rate: int) -> int:
+    return max(1, int(round((60.0 / parameters.bpm) * sample_rate)))
+
+
+def _loop_frame_count(parameters: MoktakParameters, sample_rate: int) -> int:
+    requested_frames = max(1, int(parameters.duration_seconds * sample_rate))
+    beat_interval = _beat_interval_frames(parameters, sample_rate)
+    beat_count = max(1, int(np.ceil(requested_frames / beat_interval)))
+    return beat_count * beat_interval
 
 
 def render_moktak(
@@ -100,11 +165,8 @@ def render_moktak(
     if not parameters.enabled or parameters.duration_seconds == 0.0:
         return np.zeros((0, source.shape[1]), dtype=np.float32), sample_rate
 
-    frame_count = max(1, int(parameters.duration_seconds * sample_rate))
-    # Frequency is changed first; duration fitting later never rescales time.
-    rendered = _shift_frequency(source, sample_rate, parameters.frequency_scale)
-    rendered = _fit_duration(rendered, frame_count)
-    rendered = _shape_intensity(rendered, parameters.intensity)
+    frame_count = _loop_frame_count(parameters, sample_rate)
+    rendered = _render_beat_pattern(source, sample_rate, parameters, frame_count)
     rendered *= parameters.gain
 
     fade_in_frames = min(frame_count, int(parameters.fade_in_seconds * sample_rate))

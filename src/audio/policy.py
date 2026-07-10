@@ -34,10 +34,10 @@ _BASE_INTENSITY = 3.0 / 7.0
 _BASE_REGULARITY = 1.0
 _BASE_DURATION_SECONDS = 3.0
 _BASE_DUCKING_GAIN = 0.40
-_NEGATIVE_FREQUENCY_SCALE = 0.88
-_CALM_NEGATIVE_FREQUENCY_SCALE = 0.82
-_NEUTRAL_FREQUENCY_SCALE = 1.0
-_POSITIVE_FREQUENCY_SCALE = 1.12
+_NEGATIVE_BPM = 48.0
+_CALM_NEGATIVE_BPM = 42.0
+_NEUTRAL_BPM = _BASE_BPM
+_POSITIVE_BPM = 78.0
 
 
 def _is_calm_mudra(mudra_state: LabeledState | None) -> bool:
@@ -56,14 +56,13 @@ def _attention_gain(base_gain: float, attention_state: NamedState | None) -> flo
 
 
 def _enabled_parameters(
-    frequency_scale: float,
+    bpm: float,
     attention_state: NamedState | None,
 ) -> MoktakParameters:
-    """Return moktak parameters editing just frequency scale and attention state."""
-    # Keep rhythm/body stable across emotions; emotion only changes frequency.
+    """Return moktak parameters editing beat density and attention state."""
     return MoktakParameters(
         enabled=True,
-        bpm=_BASE_BPM,
+        bpm=bpm,
         gain=_attention_gain(_BASE_GAIN, attention_state),
         intensity=_BASE_INTENSITY,
         regularity=_BASE_REGULARITY,
@@ -71,7 +70,6 @@ def _enabled_parameters(
         ducking_gain=_BASE_DUCKING_GAIN,
         fade_in_seconds=0.0,
         fade_out_seconds=0.0,
-        frequency_scale=frequency_scale,
     )
 
 
@@ -89,26 +87,24 @@ def decide_moktak(
 
     if emotion_label == "negative_expression":
         if _is_calm_mudra(mudra_state):
-            # A calm mudra makes the negative-expression cue deeper, not slower.
+            # A calm mudra makes the negative-expression cue more spacious.
             return _enabled_parameters(
-                _CALM_NEGATIVE_FREQUENCY_SCALE,
+                _CALM_NEGATIVE_BPM,
                 attention_state,
             )
-        # Negative apparent expression lowers the moktak frequency.
         return _enabled_parameters(
-            _NEGATIVE_FREQUENCY_SCALE,
+            _NEGATIVE_BPM,
             attention_state,
         )
 
     if emotion_label == "positive_expression":
-        # Positive apparent expression raises the moktak frequency.
         return _enabled_parameters(
-            _POSITIVE_FREQUENCY_SCALE,
+            _POSITIVE_BPM,
             attention_state,
         )
 
     # Neutral and temporarily missing detections keep the base rhythm running.
     return _enabled_parameters(
-        _NEUTRAL_FREQUENCY_SCALE,
+        _NEUTRAL_BPM,
         attention_state,
     )

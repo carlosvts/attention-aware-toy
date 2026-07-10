@@ -37,7 +37,6 @@ class MoktakDisplay:
             f"gain={parameters.gain:.2f} "
             f"intensity={parameters.intensity:.2f} "
             f"regularity={parameters.regularity:.2f} "
-            f"frequency_scale={parameters.frequency_scale:.2f} "
             f"duration={parameters.duration_seconds:.2f}s "
             f"ducking_gain={parameters.ducking_gain:.2f} "
             f"fade_in={parameters.fade_in_seconds:.2f}s "

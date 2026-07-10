@@ -19,16 +19,35 @@ class MoktakPlayer:
         self._samples = np.zeros((0, 1), dtype=np.float32)
         self._sample_rate = 1
         self._started_at = 0.0
+        self._beat_clock_started_at: float | None = None
         self.last_error: str | None = None
 
     def play(self, parameters: MoktakParameters) -> bool:
-        self._samples, self._sample_rate = render_moktak(
+        now = time.monotonic()
+        was_playing = bool(len(self._samples))
+        samples, sample_rate = render_moktak(
             parameters,
             self.asset_path,
         )
-        self._started_at = time.monotonic()
+        if parameters.enabled and len(samples):
+            if self._beat_clock_started_at is None:
+                self._beat_clock_started_at = now
+            elif was_playing:
+                beat_interval = max(
+                    1,
+                    int(round((60.0 / parameters.bpm) * sample_rate)),
+                )
+                elapsed_frames = int((now - self._beat_clock_started_at) * sample_rate)
+                phase_offset = elapsed_frames % beat_interval
+                if phase_offset:
+                    samples = np.roll(samples, -phase_offset, axis=0)
+
+        self._samples = samples
+        self._sample_rate = sample_rate
+        self._started_at = now
         self.last_error = None
         if not parameters.enabled or not len(self._samples):
+            self._beat_clock_started_at = None
             self.stop()
             return False
 
