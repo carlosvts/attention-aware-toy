@@ -5,6 +5,7 @@ import time
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import signal
 
 from .display import DEFAULT_MOKTAK_PATH
 from .models import MoktakParameters
@@ -22,6 +23,56 @@ class MoktakPlayer:
         self._beat_clock_started_at: float | None = None
         self.last_error: str | None = None
 
+    def _phase_align(
+        self,
+        samples: AudioBuffer,
+        sample_rate: int,
+        parameters: MoktakParameters,
+        now: float,
+        was_playing: bool,
+    ) -> AudioBuffer:
+        if self._beat_clock_started_at is None:
+            self._beat_clock_started_at = now
+            return samples
+        if not was_playing:
+            return samples
+
+        beat_interval = max(
+            1,
+            int(round((60.0 / parameters.bpm) * sample_rate)),
+        )
+        elapsed_frames = int((now - self._beat_clock_started_at) * sample_rate)
+        phase_offset = elapsed_frames % beat_interval
+        if not phase_offset:
+            return samples
+        return np.roll(samples, -phase_offset, axis=0)
+
+    def _play_samples(
+        self,
+        samples: AudioBuffer,
+        sample_rate: int,
+        *,
+        blocking: bool,
+        loop: bool,
+    ) -> bool:
+        try:
+            import sounddevice as sd
+
+            sd.stop()
+            sd.play(
+                samples,
+                sample_rate,
+                blocking=blocking,
+                loop=loop,
+            )
+            if blocking:
+                sd.wait()
+            return True
+        except Exception as error:
+            self.last_error = str(error)
+            print(f"moktak audio unavailable; visualizer only: {error}")
+            return False
+
     def play(self, parameters: MoktakParameters) -> bool:
         now = time.monotonic()
         was_playing = bool(len(self._samples))
@@ -30,17 +81,13 @@ class MoktakPlayer:
             self.asset_path,
         )
         if parameters.enabled and len(samples):
-            if self._beat_clock_started_at is None:
-                self._beat_clock_started_at = now
-            elif was_playing:
-                beat_interval = max(
-                    1,
-                    int(round((60.0 / parameters.bpm) * sample_rate)),
-                )
-                elapsed_frames = int((now - self._beat_clock_started_at) * sample_rate)
-                phase_offset = elapsed_frames % beat_interval
-                if phase_offset:
-                    samples = np.roll(samples, -phase_offset, axis=0)
+            samples = self._phase_align(
+                samples,
+                sample_rate,
+                parameters,
+                now,
+                was_playing,
+            )
 
         self._samples = samples
         self._sample_rate = sample_rate
@@ -51,21 +98,66 @@ class MoktakPlayer:
             self.stop()
             return False
 
-        try:
-            import sounddevice as sd
+        self.last_error = None
+        return self._play_samples(
+            self._samples,
+            self._sample_rate,
+            blocking=False,
+            loop=True,
+        )
 
-            sd.stop()
-            sd.play(
-                self._samples,
-                self._sample_rate,
-                blocking=False,
-                loop=True,
-            )
-            return True
-        except Exception as error:
-            self.last_error = str(error)
-            print(f"moktak audio unavailable; visualizer only: {error}")
+    def play_ducked_speech(
+        self,
+        parameters: MoktakParameters,
+        speech_samples: AudioBuffer,
+        speech_sample_rate: int,
+    ) -> bool:
+        """Play generated speech mixed over ducked moktak audio."""
+        if not len(speech_samples) or speech_sample_rate <= 0:
             return False
+
+        now = time.monotonic()
+        ducked_parameters = MoktakParameters(
+            enabled=parameters.enabled,
+            bpm=parameters.bpm,
+            gain=parameters.gain * parameters.ducking_gain,
+            intensity=parameters.intensity,
+            regularity=parameters.regularity,
+            duration_seconds=parameters.duration_seconds,
+            ducking_gain=parameters.ducking_gain,
+            fade_in_seconds=parameters.fade_in_seconds,
+            fade_out_seconds=parameters.fade_out_seconds,
+            frequency_scale=parameters.frequency_scale,
+        )
+        moktak_samples, moktak_rate = render_moktak(
+            ducked_parameters,
+            self.asset_path,
+        )
+        if not len(moktak_samples):
+            return self._play_samples(
+                speech_samples,
+                speech_sample_rate,
+                blocking=True,
+                loop=False,
+            )
+
+        moktak_samples = self._phase_align(
+            moktak_samples,
+            moktak_rate,
+            parameters,
+            now,
+            bool(len(self._samples)),
+        )
+        speech = _resample_if_needed(speech_samples, speech_sample_rate, moktak_rate)
+        speech = _match_channels(speech, moktak_samples.shape[1])
+        indices = np.arange(len(speech)) % len(moktak_samples)
+        mixed = np.clip(speech + moktak_samples[indices], -1.0, 1.0).astype(np.float32)
+
+        self._samples = mixed
+        self._sample_rate = moktak_rate
+        self._started_at = now
+        self.last_error = None
+        return self._play_samples(mixed, moktak_rate, blocking=True, loop=False)
 
     def stop(self) -> None:
         try:
@@ -100,3 +192,27 @@ class MoktakPlayer:
 
     def __exit__(self, *_: object) -> None:
         self.stop()
+
+
+def _resample_if_needed(
+    samples: AudioBuffer,
+    source_rate: int,
+    target_rate: int,
+) -> AudioBuffer:
+    if source_rate == target_rate:
+        return samples.astype(np.float32)
+
+    gcd = int(np.gcd(source_rate, target_rate))
+    up = target_rate // gcd
+    down = source_rate // gcd
+    return signal.resample_poly(samples, up, down, axis=0).astype(np.float32)
+
+
+def _match_channels(samples: AudioBuffer, channels: int) -> AudioBuffer:
+    if samples.shape[1] == channels:
+        return samples.astype(np.float32)
+    if channels == 1:
+        return np.mean(samples, axis=1, keepdims=True).astype(np.float32)
+    if samples.shape[1] == 1:
+        return np.repeat(samples, channels, axis=1).astype(np.float32)
+    return samples[:, :channels].astype(np.float32)
