@@ -124,6 +124,7 @@ pyparted==3.13.0
 PySocks==1.7.1
 python-augeas==1.2.0
 python-dateutil==2.9.0.post0
+python-dotenv==1.2.1
 python-meh==0.52
 python-xlib==0.33
 pyudev==0.24.3
