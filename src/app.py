@@ -1,6 +1,6 @@
 """Threaded webcam app for the attention-triggered expression pipeline."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 import time
@@ -15,7 +15,14 @@ from src.attention import (
     AttentionState,
     GazeDurationTracker,
 )
-from src.audio import MoktakParameters, MoktakPlayer, create_tts, decide_moktak
+from src.audio import (
+    AttentionActivationTracker,
+    MoktakSession,
+    MoktakState,
+    PositiveEmotionHoldTracker,
+    build_effect_profile_from_env,
+    create_tts,
+)
 from src.config import env_bool, env_float, env_int
 from src.debug import draw_attention_overlay, draw_emotion_overlay, show_or_close
 from src.emotions import EmotionDetector, EmotionState
@@ -26,15 +33,15 @@ CAMERA_INDEX = env_int("CAMERA_INDEX", 0)
 ATTENTION_THRESHOLD = env_float("ATTENTION_THRESHOLD", 0.7)
 ATTENTION_DURATION_SECONDS = env_float("ATTENTION_DURATION_SECONDS", 1.0)
 COOLDOWN_SECONDS = env_float("COOLDOWN_SECONDS", 5.0)
-MIN_DUCKING_SECONDS = env_float("MIN_DUCKING_SECONDS", 1.2)
-SPEECH_WORDS_PER_SECOND = env_float("SPEECH_WORDS_PER_SECOND", 2.6)
-
+EMOTION_POLL_SECONDS = env_float("EMOTION_POLL_SECONDS", 0.15)
 SHOW_ATTENTION_WINDOW = env_bool("SHOW_ATTENTION_WINDOW", True)
 SHOW_EMOTION_SNAPSHOT_WINDOW = env_bool("SHOW_EMOTION_SNAPSHOT_WINDOW", True)
 SHOW_MUDRA_SNAPSHOT_WINDOW = env_bool("SHOW_MUDRA_SNAPSHOT_WINDOW", True)
+SHOW_MOKTAK_DEBUG_WINDOW = env_bool("SHOW_MOKTAK_DEBUG_WINDOW", True)
 ATTENTION_WINDOW_NAME = "Attention"
 EMOTION_SNAPSHOT_WINDOW_NAME = "Emotion Snapshot"
 MUDRA_SNAPSHOT_WINDOW_NAME = "Mudra Snapshot"
+MOKTAK_DEBUG_WINDOW_NAME = "Moktak Debug"
 
 
 @dataclass(frozen=True)
@@ -105,15 +112,6 @@ def _format_meditation_context(
     )
 
 
-def _ducked_parameters(parameters: MoktakParameters) -> MoktakParameters:
-    return replace(parameters, gain=parameters.gain * parameters.ducking_gain)
-
-
-def _estimated_speech_seconds(response: str) -> float:
-    word_count = len(response.split())
-    return max(MIN_DUCKING_SECONDS, word_count / SPEECH_WORDS_PER_SECOND)
-
-
 def _draw_mudra_overlay(
     frame: NDArray[np.uint8],
     mudra: MudraState | None,
@@ -153,6 +151,103 @@ def _draw_snapshot_title(
     )
 
 
+def _handle_moktak_attention_event(
+    *,
+    state: AttentionState,
+    sustained_attention: bool,
+    activation_tracker: AttentionActivationTracker,
+    moktak: MoktakSession,
+) -> None:
+    if state is AttentionState.NO_FACE:
+        moktak.stop_session()
+        activation_tracker.update(
+            sustained_attention=False,
+            no_face=True,
+        )
+    elif activation_tracker.update(sustained_attention=sustained_attention):
+        moktak.start_session()
+
+
+def _handle_moktak_emotion_event(
+    *,
+    emotion: EmotionState | None,
+    timestamp: float,
+    positive_tracker: PositiveEmotionHoldTracker,
+    moktak: MoktakSession,
+) -> None:
+    if (
+        moktak.state is MoktakState.PLAYING
+        and positive_tracker.update(emotion, timestamp)
+    ):
+        moktak.trigger_positive_effect()
+
+
+def _render_moktak_debug(
+    *,
+    emotion: EmotionState | None,
+    attention: AttentionPacket | None,
+    moktak_state: MoktakState,
+    size: tuple[int, int] = (360, 640),
+) -> NDArray[np.uint8]:
+    height, width = size
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    title_color = (120, 220, 255)
+    text_color = (230, 230, 230)
+
+    lines = ["Moktak Debug"]
+    if emotion is None:
+        lines.extend(
+            [
+                "emotion: none",
+                "emotion_confidence: 0.000",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"emotion: {emotion.label}",
+                f"emotion_confidence: {emotion.confidence:.3f}",
+            ]
+        )
+
+    if attention is None:
+        lines.extend(
+            [
+                "attention_state: none",
+                "sustained_attention_seconds: 0.0",
+            ]
+        )
+    else:
+        sustained_seconds = (
+            attention.gaze_duration
+            if attention.state is AttentionState.ATTENDING
+            else 0.0
+        )
+        lines.extend(
+            [
+                f"attention_state: {attention.state.name}",
+                f"sustained_attention_seconds: {sustained_seconds:.1f}",
+            ]
+        )
+
+    lines.append(f"moktak_state: {moktak_state.name}")
+
+    row = 38
+    for index, line in enumerate(lines):
+        cv2.putText(
+            canvas,
+            line,
+            (18, row),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.68 if index == 0 else 0.58,
+            title_color if index == 0 else text_color,
+            1,
+            cv2.LINE_AA,
+        )
+        row += 38 if index == 0 else 32
+    return canvas
+
+
 def _camera_worker(
     stop_event: Event,
     latest_frame: LatestValue,
@@ -188,8 +283,10 @@ def _attention_worker(
     attention_frames: Queue[FramePacket],
     latest_attention: LatestValue,
     emotion_events: Queue[FramePacket],
+    moktak: MoktakSession,
 ) -> None:
     gaze_tracker = GazeDurationTracker()
+    activation_tracker = AttentionActivationTracker()
     last_trigger_at = float("-inf")
 
     try:
@@ -210,6 +307,12 @@ def _attention_worker(
                 sustained_attention = (
                     state is AttentionState.ATTENDING
                     and gaze_duration >= ATTENTION_DURATION_SECONDS
+                )
+                _handle_moktak_attention_event(
+                    state=state,
+                    sustained_attention=sustained_attention,
+                    activation_tracker=activation_tracker,
+                    moktak=moktak,
                 )
 
                 latest_attention.set(
@@ -241,25 +344,50 @@ def _event_worker(
     emotion_events: Queue[FramePacket],
     latest_snapshot: LatestValue,
     latest_attention: LatestValue,
+    latest_frame: LatestValue,
+    moktak: MoktakSession,
 ) -> None:
     mudra_detector = MudraDetectorMock()
     tts = create_tts()
     number_responses = 0
-    active_moktak_parameters = MoktakParameters.disabled()
+    positive_tracker = PositiveEmotionHoldTracker(moktak.positive_hold_seconds)
+    next_live_emotion_at = 0.0
     try:
-        with EmotionDetector() as emotion_detector, MoktakPlayer() as moktak_player:
+        with EmotionDetector() as emotion_detector:
             while not stop_event.is_set():
                 try:
                     packet = emotion_events.get(timeout=0.05)
                 except Empty:
                     attention = latest_attention.get()
                     if (
-                        active_moktak_parameters.enabled
-                        and attention is not None
+                        attention is not None
                         and attention.state is AttentionState.NO_FACE
                     ):
-                        active_moktak_parameters = MoktakParameters.disabled()
-                        moktak_player.play(active_moktak_parameters)
+                        moktak.stop_session()
+                        positive_tracker.reset()
+                    if moktak.state is MoktakState.STOPPED:
+                        positive_tracker.reset()
+                    now = time.monotonic()
+                    if (
+                        moktak.state is MoktakState.PLAYING
+                        and now >= next_live_emotion_at
+                    ):
+                        next_live_emotion_at = now + EMOTION_POLL_SECONDS
+                        frame_packet = latest_frame.get()
+                        if frame_packet is not None:
+                            live_emotion = emotion_detector.detect(frame_packet.frame)
+                            _handle_moktak_emotion_event(
+                                emotion=live_emotion,
+                                timestamp=now,
+                                positive_tracker=positive_tracker,
+                                moktak=moktak,
+                            )
+                            latest_snapshot.set(
+                                EmotionSnapshot(
+                                    frame=frame_packet.frame.copy(),
+                                    emotion=live_emotion,
+                                )
+                            )
                     continue
 
                 attention = latest_attention.get()
@@ -268,19 +396,21 @@ def _event_worker(
                     if attention is not None
                     else AttentionState.ATTENDING
                 )
-                gaze_duration = attention.gaze_duration if attention is not None else 0.0
-
-                initial_moktak_parameters = decide_moktak(
-                    emotion_state=None,
-                    attention_state=attention_state,
+                gaze_duration = (
+                    attention.gaze_duration if attention is not None else 0.0
                 )
-                moktak_player.play(initial_moktak_parameters)
-                active_moktak_parameters = initial_moktak_parameters
 
                 emotion = emotion_detector.detect(packet.frame)
                 mudra = mudra_detector.detect(packet.frame)
                 expression = emotion.label if emotion else "none"
                 confidence = emotion.confidence if emotion else 0.0
+                now = time.monotonic()
+                _handle_moktak_emotion_event(
+                    emotion=emotion,
+                    timestamp=now,
+                    positive_tracker=positive_tracker,
+                    moktak=moktak,
+                )
 
                 latest_snapshot.set(
                     EmotionSnapshot(
@@ -291,13 +421,6 @@ def _event_worker(
                 )
 
                 meditation_context = _format_meditation_context(mudra, emotion)
-                moktak_parameters = decide_moktak(
-                    emotion_state=emotion,
-                    mudra_state=mudra,
-                    attention_state=attention_state,
-                )
-                moktak_player.play(moktak_parameters)
-                active_moktak_parameters = moktak_parameters
 
                 response = generate_response(
                     meditation_context,
@@ -306,11 +429,11 @@ def _event_worker(
                     emotion_state=emotion,
                 )
                 speech_audio = tts.synthesize(response)
-                
+
                 ###################################################
                 # Debug prints
                 print()
-                print("="*50)
+                print("=" * 50)
                 print("Interaction Number: ", number_responses)
                 print("attention detected", flush=True)
                 print(
@@ -323,25 +446,13 @@ def _event_worker(
                 )
                 print(f"meditation_context={meditation_context}", flush=True)
                 print(f"llm_response={response}", flush=True)
-                print("moktak_ducking=on", flush=True)
-                print("="*50)
+                print("=" * 50)
                 print()
                 if speech_audio is not None:
-                    print("tts_audio=on", flush=True)
-                    moktak_player.play_ducked_speech(
-                        moktak_parameters,
-                        speech_audio.samples,
-                        speech_audio.sample_rate,
-                    )
+                    print("tts_audio=generated", flush=True)
                 else:
                     if tts.last_error:
                         print(f"tts_audio=off reason={tts.last_error}", flush=True)
-                    ducked_parameters = _ducked_parameters(moktak_parameters)
-                    moktak_player.play(ducked_parameters)
-                    time.sleep(_estimated_speech_seconds(response))
-                moktak_player.play(moktak_parameters)
-                active_moktak_parameters = moktak_parameters
-                print("moktak_ducking=off", flush=True)
 
                 number_responses += 1
                 # End debug prints
@@ -367,6 +478,13 @@ def run() -> None:
     latest_snapshot = LatestValue()
     attention_frames: Queue[FramePacket] = Queue(maxsize=1)
     emotion_events: Queue[FramePacket] = Queue(maxsize=1)
+    moktak = MoktakSession(
+        effect_profile=build_effect_profile_from_env(
+            env_float=env_float,
+            env_int=env_int,
+        ),
+    )
+    moktak.start()
 
     workers = (
         Thread(
@@ -377,13 +495,26 @@ def run() -> None:
         ),
         Thread(
             target=_attention_worker,
-            args=(stop_event, attention_frames, latest_attention, emotion_events),
+            args=(
+                stop_event,
+                attention_frames,
+                latest_attention,
+                emotion_events,
+                moktak,
+            ),
             name="attention-worker",
             daemon=True,
         ),
         Thread(
             target=_event_worker,
-            args=(stop_event, emotion_events, latest_snapshot, latest_attention),
+            args=(
+                stop_event,
+                emotion_events,
+                latest_snapshot,
+                latest_attention,
+                latest_frame,
+                moktak,
+            ),
             name="event-worker",
             daemon=True,
         ),
@@ -396,9 +527,11 @@ def run() -> None:
         cv2.namedWindow(ATTENTION_WINDOW_NAME, cv2.WINDOW_NORMAL)
         cv2.namedWindow(EMOTION_SNAPSHOT_WINDOW_NAME, cv2.WINDOW_NORMAL)
         cv2.namedWindow(MUDRA_SNAPSHOT_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(MOKTAK_DEBUG_WINDOW_NAME, cv2.WINDOW_NORMAL)
         cv2.moveWindow(ATTENTION_WINDOW_NAME, 40, 80)
         cv2.moveWindow(EMOTION_SNAPSHOT_WINDOW_NAME, 760, 80)
         cv2.moveWindow(MUDRA_SNAPSHOT_WINDOW_NAME, 760, 560)
+        cv2.moveWindow(MOKTAK_DEBUG_WINDOW_NAME, 1320, 80)
 
         while not stop_event.is_set():
             frame_packet = latest_frame.get()
@@ -460,6 +593,20 @@ def run() -> None:
                     mudra_view,
                 )
 
+            debug_emotion = (
+                snapshot_packet.emotion if snapshot_packet is not None else None
+            )
+            moktak_debug_view = _render_moktak_debug(
+                emotion=debug_emotion,
+                attention=attention_packet,
+                moktak_state=moktak.state,
+            )
+            show_or_close(
+                MOKTAK_DEBUG_WINDOW_NAME,
+                SHOW_MOKTAK_DEBUG_WINDOW,
+                moktak_debug_view,
+            )
+
             if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
                 stop_event.set()
                 break
@@ -469,6 +616,7 @@ def run() -> None:
         stop_event.set()
         for worker in workers:
             worker.join(timeout=2.0)
+        moktak.shutdown()
         cv2.destroyAllWindows()
 
 

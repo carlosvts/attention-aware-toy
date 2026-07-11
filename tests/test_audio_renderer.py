@@ -1,12 +1,19 @@
 """Tests for emotion-driven moktak audio rendering."""
 
 from pathlib import Path
+import math
 from types import SimpleNamespace
 import wave
 
 import numpy as np
 
-from src.audio import MoktakParameters, decide_moktak, render_moktak
+from src.audio import (
+    MoktakEffectProfile,
+    MoktakParameters,
+    decide_moktak,
+    render_moktak,
+    render_moktak_hit,
+)
 
 
 def _write_wav(path: Path, samples: np.ndarray, sample_rate: int) -> None:
@@ -119,3 +126,68 @@ def test_renderer_preserves_source_frequency(tmp_path: Path) -> None:
     base_frequency = _dominant_frequency(base, sample_rate)
     assert np.isclose(_dominant_frequency(lower, sample_rate), base_frequency)
     assert np.isclose(_dominant_frequency(higher, sample_rate), base_frequency)
+
+
+def test_single_hit_renderer_preserves_source_frequency(tmp_path: Path) -> None:
+    sample_rate = 8000
+    duration_seconds = 0.20
+    time = np.arange(int(sample_rate * duration_seconds)) / sample_rate
+    source = np.sin(2.0 * np.pi * 440.0 * time).astype(np.float32)
+    wav_path = tmp_path / "hit.wav"
+    _write_wav(wav_path, source, sample_rate)
+
+    hit, hit_rate = render_moktak_hit(wav_path, bpm=60.0, gain=0.5)
+
+    assert hit_rate == sample_rate
+    assert len(hit) <= len(source)
+    assert np.isclose(_dominant_frequency(hit, sample_rate), 440.0, atol=5.0)
+    assert np.max(np.abs(hit)) <= 0.5
+
+
+def test_positive_effect_uses_curved_acceleration_and_fade() -> None:
+    profile = MoktakEffectProfile(
+        normal_bpm=60.0,
+        peak_bpm=180.0,
+        acceleration_steps=5,
+        deceleration_steps=7,
+        normal_gain=0.8,
+        minimum_gain=0.2,
+        fade_power=1.5,
+    )
+
+    steps = profile.positive_steps()
+    intervals = [step.interval_seconds for step in steps]
+    gains = [step.gain for step in steps]
+    acceleration = intervals[: profile.acceleration_steps]
+    deceleration = intervals[profile.acceleration_steps - 1 :]
+    acceleration_deltas = [
+        left - right for left, right in zip(acceleration, acceleration[1:])
+    ]
+
+    assert all(left > right for left, right in zip(acceleration, acceleration[1:]))
+    assert all(left < right for left, right in zip(deceleration, deceleration[1:]))
+    assert all(
+        left > right
+        for left, right in zip(
+            gains[profile.acceleration_steps - 1 :],
+            gains[profile.acceleration_steps :],
+        )
+    )
+    assert not np.allclose(acceleration_deltas, acceleration_deltas[0])
+
+    midpoint = profile.acceleration_steps // 2
+    expected_mid_progress = math.sin(
+        math.pi * (midpoint / (profile.acceleration_steps - 1)) / 2.0
+    ) ** 2.0
+    expected_mid_bpm = profile.normal_bpm + (
+        profile.peak_bpm - profile.normal_bpm
+    ) * expected_mid_progress
+    assert np.isclose(acceleration[midpoint], 60.0 / expected_mid_bpm)
+
+    first_down_ratio = 1 / (profile.deceleration_steps - 1)
+    first_down_energy = 0.5 * (1.0 + math.cos(math.pi * first_down_ratio))
+    final_bpm = profile.normal_bpm / profile.final_interval_multiplier
+    expected_first_down_bpm = final_bpm + (
+        profile.peak_bpm - final_bpm
+    ) * first_down_energy
+    assert np.isclose(intervals[profile.acceleration_steps], 60.0 / expected_first_down_bpm)

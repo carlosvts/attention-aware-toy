@@ -9,7 +9,7 @@ from scipy import signal
 
 from .display import DEFAULT_MOKTAK_PATH
 from .models import MoktakParameters
-from .renderer import AudioBuffer, render_moktak
+from .renderer import AudioBuffer, render_moktak, render_moktak_hit
 
 
 class MoktakPlayer:
@@ -19,6 +19,8 @@ class MoktakPlayer:
         self.asset_path = asset_path
         self._samples = np.zeros((0, 1), dtype=np.float32)
         self._sample_rate = 1
+        self._hit_samples: AudioBuffer | None = None
+        self._hit_sample_rate = 1
         self._started_at = 0.0
         self._beat_clock_started_at: float | None = None
         self.last_error: str | None = None
@@ -105,6 +107,23 @@ class MoktakPlayer:
             blocking=False,
             loop=True,
         )
+
+    def play_beat(self, gain: float = 1.0) -> bool:
+        """Play one natural moktak hit without owning rhythm timing."""
+        if self._hit_samples is None:
+            self._hit_samples, self._hit_sample_rate = render_moktak_hit(
+                self.asset_path,
+                gain=1.0,
+            )
+        samples = np.clip(self._hit_samples * gain, -1.0, 1.0).astype(np.float32)
+        sample_rate = self._hit_sample_rate
+        self._samples = samples
+        self._sample_rate = sample_rate
+        self._started_at = time.monotonic()
+        self.last_error = None
+        if not len(samples):
+            return False
+        return self._play_samples(samples, sample_rate, blocking=False, loop=False)
 
     def play_ducked_speech(
         self,

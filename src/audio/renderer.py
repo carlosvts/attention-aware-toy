@@ -182,3 +182,27 @@ def render_moktak(
         )[:, None]
 
     return np.clip(rendered, -1.0, 1.0).astype(np.float32), sample_rate
+
+
+def render_moktak_hit(
+    path: Path = DEFAULT_MOKTAK_PATH,
+    *,
+    bpm: float = 60.0,
+    gain: float = 1.0,
+    intensity: float = 3.0 / 7.0,
+) -> tuple[AudioBuffer, int]:
+    """Render one natural-speed moktak hit for event-driven scheduling."""
+    if bpm <= 0.0:
+        raise ValueError("bpm must be positive")
+    if not 0.0 <= gain <= 1.0:
+        raise ValueError("gain must be between 0.0 and 1.0")
+    if not 0.0 <= intensity <= 1.0:
+        raise ValueError("intensity must be between 0.0 and 1.0")
+
+    source, sample_rate = load_wav(path)
+    beat_interval = max(1, int(round((60.0 / bpm) * sample_rate)))
+    hit = _shape_intensity(
+        _prepare_hit(source, sample_rate, beat_interval),
+        intensity,
+    )
+    return np.clip(hit * gain, -1.0, 1.0).astype(np.float32), sample_rate
