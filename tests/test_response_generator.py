@@ -22,7 +22,7 @@ class ResponsePromptTests(unittest.TestCase):
         )
 
         result = generate_response(
-            "Uma pessoa está diante da câmera.",
+            "meditation_context:\n  mudra: mock_mudra",
             AttentionState.ATTENDING,
             1.24,
             emotion_state=emotion_state,
@@ -34,16 +34,14 @@ class ResponsePromptTests(unittest.TestCase):
             client_factory.return_value.chat.call_args.kwargs["profiling_name"],
             "qwen_llm",
         )
-        self.assertIn("robô social", system_prompt)
-        self.assertIn("Não invente intenção, emoção ou identidade.", system_prompt)
-        self.assertIn("Estado de atenção do usuário: ATTENDING", user_prompt)
-        self.assertIn("Duração do olhar: 1.2s", user_prompt)
+        self.assertIn("Buddhist meditation", system_prompt)
+        self.assertIn("Do not invent intention, emotion, or identity.", system_prompt)
+        self.assertIn("User attention state: ATTENDING", user_prompt)
+        self.assertIn("Gaze duration: 1.2s", user_prompt)
         self.assertIn("apparent_affect:", user_prompt)
         self.assertIn("label: negative_expression", user_prompt)
         self.assertIn("confidence: 0.720", user_prompt)
-        self.assertIn(
-            "Uma pessoa está diante da câmera.", user_prompt
-        )
+        self.assertIn("mudra: mock_mudra", user_prompt)
 
 
 if __name__ == "__main__":

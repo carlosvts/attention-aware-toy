@@ -13,7 +13,7 @@ from .types import EmotionState
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
-# averages the score of a specific blendshape 
+# averages the score of a specific blendshape
 def _score(blendshapes: dict[str, float], *names: str) -> float:
     if not names:
         return 0.0
@@ -21,24 +21,48 @@ def _score(blendshapes: dict[str, float], *names: str) -> float:
 
 
 def classify_expression(blendshapes: dict[str, float]) -> EmotionState:
-    """Map MediaPipe blendshapes to cautious apparent-expression labels."""
+    """
+        Facial expression heuristic based on FACS Action Units (AUs), approximated
+        using MediaPipe Face Landmarker blendshapes.
+
+        Positive (happiness):
+        - AU12 (Lip Corner Puller) -> mouthSmileLeft/Right
+        - AU6 (Cheek Raiser) -> cheekSquintLeft/Right
+
+        Sadness:
+        - AU1 (Inner Brow Raiser) -> browInnerUp
+        - AU4 (Brow Lowerer) -> browDownLeft/Right
+        - AU15 (Lip Corner Depressor) -> mouthFrownLeft/Right
+
+        Anger / tension:
+        - AU4 (Brow Lowerer) -> browDownLeft/Right
+        - AU7 (Lid Tightener) -> eyeSquintLeft/Right
+        - AU23/24 (Lip Tightener/Pressor) -> mouthPressLeft/Right, mouthClose
+
+        Disgust / aversion:
+        - AU9 (Nose Wrinkler) -> noseSneerLeft/Right
+        - AU10 (Upper Lip Raiser) -> mouthUpperUpLeft/Right
+        - AU15 (Lip Corner Depressor) -> mouthFrownLeft/Right
+
+        Negative expressions require both upper- and lower-face activation to reduce
+        false positives from isolated blendshape activations.
+
+        Sources:
+        - Ekman, Friesen & Hager, Facial Action Coding System (FACS), 2002.
+        - MediaPipe Face Landmarker documentation.
+        - iMotions FACS guide.
+        - Noldus FaceReader/FACS reference.
+    """
     smile = _score(blendshapes, "mouthSmileLeft", "mouthSmileRight")
     frown = _score(blendshapes, "mouthFrownLeft", "mouthFrownRight")
     eye_squint = _score(blendshapes, "eyeSquintLeft", "eyeSquintRight")
-
+    mouth_close = _score(blendshapes, "mouthClose")
+    mouth_frown = _score(blendshapes, "mouthFrownLeft", "mouthFrownRight")
+    brow_inner_up = _score(blendshapes, "browInnerUp")
     brow_down = _score(blendshapes, "browDownLeft", "browDownRight")
     brow_outer_up = _score(blendshapes, "browOuterUpRight", "browOuterUpLeft")
     eye_wide = _score(blendshapes, "eyeWideLeft", "eyeWideRight")
     jaw_open = _score(blendshapes, "jawOpen")
-    surprised = (
-        0.45 * brow_outer_up
-        + 0.40 * eye_wide
-        + 0.15 * jaw_open
-    )
-    positive = max(
-        smile if smile >= 0.30 else 0.0,
-        surprised if surprised >= 0.22 else 0.0,
-    )
     shrug = _score(blendshapes, "mouthShrugUpper", "mouthShrugLower")
     mouth_shrug_lower = _score(blendshapes, "mouthShrugLower")
     mouth_pucker = _score(blendshapes, "mouthPucker")
@@ -53,72 +77,146 @@ def classify_expression(blendshapes: dict[str, float]) -> EmotionState:
         "mouthUpperUpLeft",
         "mouthUpperUpRight",
     )
-    # A negative expression must have mutually supporting cues. The activation
-    # floor rejects isolated blendshapes, while the weighted averages retain
-    # information from every active cue instead of collapsing to the weakest.
-    activation_floor = 0.08
 
-    mouth_tension = max(mouth_press, frown)
-    tension_support = 0.70 * brow_down + 0.30 * eye_squint
-    tension = 0.0
-    if (
-        mouth_tension >= activation_floor
-        and max(brow_down, eye_squint) >= activation_floor
-    ):
-        tension = 0.55 * mouth_tension + 0.45 * tension_support
-
-    negative_mouth_support = max(
-        upper_lip,
+    upper_negative = max(brow_down, eye_squint, brow_inner_up)
+    lower_negative = max(
+        mouth_frown,
         mouth_press,
-        frown,
-        mouth_shrug_lower,
+        nose_sneer,
+        upper_lip,
     )
-    nasal_negative = 0.0
-    if (
-        nose_sneer >= activation_floor
-        and negative_mouth_support >= activation_floor
-    ):
-        nasal_negative = 0.60 * nose_sneer + 0.40 * negative_mouth_support
 
-    sadness_cues = (
-        (mouth_shrug_lower, 0.60),
-        (frown, 0.40),
+    """
+        Since negative expressions usually have more than one muscle in the face active
+        this variables will ensure that a negative expression can only be
+        evaluated if we have, e.g a brow AND mouth signal indicating that. Avoiding false positives
+    """
+    # has_cross_face_support = (
+    #    upper_negative >= 0.08
+    #    and lower_negative >= 0.08
+    #)
+    has_sadness_support = (
+        mouth_frown >= 0.025
+        and max(brow_inner_up, brow_down) >= 0.08
     )
-    sadness = 0.0
-    active_sadness_cues = [
-        (cue, weight)
-        for cue, weight in sadness_cues
-        if cue >= activation_floor
-    ]
-    if len(active_sadness_cues) >= 2:
-        active_weight = sum(weight for _, weight in active_sadness_cues)
-        sadness_base = sum(
-            cue * weight for cue, weight in active_sadness_cues
-        ) / active_weight
-        sadness = (
-            0.90 * sadness_base
-            + 0.10 * mouth_pucker
+
+    has_disgust_support = (
+        nose_sneer >= 0.06
+        and max(upper_lip, mouth_frown) >= 0.025
+    )
+
+    has_tension_support = (
+        brow_down >= 0.18
+        and eye_squint >= 0.16
+        and max(mouth_press, mouth_close, mouth_frown, mouth_shrug_lower) >= 0.005
+    )
+
+    anger_tension = 0.0
+    if brow_down >= 0.10 and max(eye_squint, mouth_press) >= 0.08:
+        anger_tension = (
+            0.45 * brow_down
+            + 0.20 * eye_squint
+            + 0.25 * mouth_press
+            + 0.10 * mouth_close
         )
 
-    negative = max(tension, nasal_negative, sadness)
+    sadness = 0.0
+    if mouth_frown >= 0.10 and max(brow_inner_up, brow_down) >= 0.08:
+        sadness = (
+            0.50 * mouth_frown
+            + 0.30 * brow_inner_up
+            + 0.15 * brow_down
+            + 0.05 * mouth_shrug_lower
+        )
+
+    disgust_aversion = 0.0
+    if nose_sneer >= 0.10 and max(upper_lip, mouth_frown) >= 0.08:
+        disgust_aversion = (
+            0.50 * nose_sneer
+            + 0.30 * upper_lip
+            + 0.20 * mouth_frown
+        )
+
+    anxiety_tension = 0.0
+    if mouth_press >= 0.10 and max(brow_down, eye_squint) >= 0.08:
+        anxiety_tension = (
+            0.40 * mouth_press
+            + 0.25 * eye_squint
+            + 0.25 * brow_down
+            + 0.10 * mouth_close
+        )
+
+    # This is the best way i get to evaluate a negative expression, idk if its optimal tho
+    # TODO: Maybe add some metric that adds up primary_emotion + sum_of_others
+    # e.g Primary is the greater one (example: sadness), so negative will be sadness * 0.80 + sum(others) * 0.20
+    raw_negative = max(
+        anger_tension     if has_tension_support else 0.0,
+        sadness           if has_sadness_support else 0.0,
+        disgust_aversion  if has_disgust_support else 0.0,
+        anxiety_tension   if has_tension_support else 0.0,
+    )
+
+    surprised = (
+        0.45 * brow_outer_up
+        + 0.40 * eye_wide
+        + 0.15 * jaw_open
+    )
+
+    positive_interference = max(smile, surprised)
+
+    if positive_interference >= 0.25:
+        raw_negative *= 0.65
+
+    if positive_interference >= 0.35:
+        raw_negative *= 0.45
+
+    negative = raw_negative
+    positive = max(
+        smile if smile >= 0.28 else 0.0,
+        surprised if surprised >= 0.24 else 0.0,
+    )
 
     candidates = {
         "positive_expression": positive,
         "negative_expression": negative,
     }
-    print(
-        f"smile={smile:.3f} surprised={surprised:.3f} positive={positive:.3f} "
-        f"frown={frown:.3f} brow_down={brow_down:.3f} "
-        f"mouth_press={mouth_press:.3f} shrug={shrug:.3f} "
-        f"nose_sneer={nose_sneer:.3f} negative={negative:.3f}"
+
+    # TODO: REMINDER: Maybe useful later?
+    negative_type, negative_type_score = max(
+        {
+            "anger_tension": anger_tension,
+            "sadness": sadness,
+            "disgust_aversion": disgust_aversion,
+            "anxiety_tension": anxiety_tension,
+        }.items(),
+        key=lambda item: item[1],
     )
 
+    # DEBUG
+    print(
+        f"positive={positive:.3f} "
+        f"negative={negative:.3f} "
+        f"negative_type={negative_type}:{negative_type_score:.3f} "
+        f"anger_tension={anger_tension:.3f} "
+        f"sadness={sadness:.3f} "
+        f"disgust_aversion={disgust_aversion:.3f} "
+        f"anxiety_tension={anxiety_tension:.3f} "
+        f"brow_down={brow_down:.3f} "
+        f"brow_inner_up={brow_inner_up:.3f} "
+        f"eye_squint={eye_squint:.3f} "
+        f"mouth_frown={mouth_frown:.3f} "
+        f"mouth_press={mouth_press:.3f} "
+        f"nose_sneer={nose_sneer:.3f}"
+    )
+    # END DEBUG
+
     thresholds = {
-        "positive_expression": 0.22,
-        "negative_expression": 0.16,
+        "positive_expression": 0.24,
+        "negative_expression": 0.18,
     }
 
     label, confidence = max(candidates.items(), key=lambda item: item[1])
+
     if confidence < thresholds[label]:
         label = "neutral_expression"
         confidence = max(0.45, 1.0 - max(candidates.values()))

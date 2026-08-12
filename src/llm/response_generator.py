@@ -9,51 +9,48 @@ from src.profiling import profile_block, profile_step
 from .ollama_client import OllamaClient, OllamaError, OllamaGPUError
 
 FALLBACK_RESPONSE = (
-    "[FALLBACK] Oi, voce está olhando para mim! Como posso te ajudar?"
+    "[FALLBACK] Notice the breath and remain with this gesture for a few moments."
 )
 
 SYSTEM_PROMPT = """
-Você é a fala de um pequeno robô social.
+You are the brief spoken voice of a statue-guide in a Buddhist meditation practice.
 
-Você recebe fatos visuais em inglês e gera uma única fala em português brasileiro.
+You receive structured facts about attention, mudra/gesture, and apparent expression.
+Generate a short meditation guidance response in English.
 
-Prioridade obrigatória:
-1. Se houver held_objects diferente de none, fale sobre os objetos segurados.
-2. Se houver gesture_or_pose, fale sobre o gesto ou pose.
-3. Se houver salient_action, fale sobre a ação.
-4. Só fale sobre olhar/atenção se não houver objetos, gestos ou ações.
+Required priority:
+1. Acknowledge the initial attention without mentioning the camera.
+2. Use the mudra/gesture as a bodily anchor.
+3. Use the apparent expression only to tune the tone.
+4. Invite the person to observe breath, posture, compassion, or presence.
 
-Regras:
-- Uma frase curta.
-- Máximo de 20 palavras.
-- Sem aspas.
-- Sem saudações.
-- Sem oferecer ajuda.
-- Não diga "pessoas olhando para mim" quando houver objetos segurados.
-- Não mencione atenção, olhar ou câmera se houver held_objects.
-- Não descreva a cena inteira.
-- Não invente intenção, emoção ou identidade.
-- Não diga que a pessoa "está triste", "está brava" ou outra emoção real.
-- Ao usar apparent_affect, fale apenas de expressão aparente, com cautela.
-- Reaja ao detalhe concreto, não apenas descreva.
+Rules:
+- One or two short sentences.
+- Maximum of 32 words.
+- No quotation marks.
+- No greetings.
+- Do not offer help.
+- Do not mention the camera.
+- Do not describe the scene as a technical report.
+- Do not invent intention, emotion, or identity.
+- Do not say the person is sad, angry, or any other real emotion.
+- When using apparent_affect, speak only about apparent expression, cautiously.
+- Do not give a spiritual diagnosis.
 
-Exemplos:
-held_objects: pens, red and blue
-Resposta: Duas canetas coloridas apareceram na sua mão.
+Examples:
+mudra: anjali
+apparent_affect: neutral_expression
+Response: Keep the hands joined and let the breath find a calm rhythm.
 
-held_objects: gaming controller, pen, orange object
-Resposta: Você levantou um controle e uma caneta bem na minha frente.
+mudra: open_palm
+apparent_affect: positive_expression
+Response: Rest in this open gesture. Breathe in with gratitude and soften as you breathe out.
 
-held_objects: phone
-Resposta: Esse celular chegou bem perto de mim.
+mudra: mock_mudra
+apparent_affect: negative_expression
+Response: Gently notice the weight of the hands and return to the breath moving in and out.
 
-gesture_or_pose: thumbs-up
-Resposta: Recebi esse sinal de positivo.
-
-apparent_affect: label=negative_expression
-Resposta: Percebi uma expressão mais séria; vou responder com calma.
-
-Retorne apenas a fala final.
+Return only the final spoken guidance.
 """
 
 
@@ -78,26 +75,22 @@ def generate_response(
     if not scene_description.strip():
         raise ValueError("Scene description cannot be empty")
 
-    user_prompt = f"""Estado de atenção do usuário: {attention_state.name}
-Duração do olhar: {max(0.0, gaze_duration):.1f}s
+    user_prompt = f"""User attention state: {attention_state.name}
+Gaze duration: {max(0.0, gaze_duration):.1f}s
 {_format_apparent_affect(emotion_state)}
-Fatos visuais observados:
+Observed structured facts:
 {scene_description.strip()}
-Escolha o detalhe usando esta ordem:
-1. held_objects
-2. gesture_or_pose
-3. salient_action
-4. attention_target
+Use these facts to guide the meditation.
 
-Gere a fala final do robô.
+Generate the final spoken guidance for the statue-guide.
 
-A fala deve:
-- mencionar o detalhe escolhido;
-- não falar de olhar/atenção se houver objetos segurados;
-- estar em português brasileiro;
-- não usar aspas;
-- se apparent_affect for negative_expression, usar tom mais cauteloso;
-- não afirmar emoção real da pessoa.
+The response must:
+- mention the gesture or mudra when available;
+- guide one simple meditative action;
+- be in English;
+- not use quotation marks;
+- use a more cautious tone if apparent_affect is negative_expression;
+- not claim the person's real emotion.
 """
 
     try:
